@@ -1,15 +1,6 @@
 #include "utils.h"
+#include "flash-attention-kernel.h"
 
-struct flash_attn_forward_params {
-    int d_k;       // dimension of K and Q
-    int d_v;       // dimension of V
-    int b_c;       // block columns (key/value blocks per tile)
-    int b_r;       // block rows (query blocks per tile)
-    int t_c;       // number of key tiles
-    int t_r;       // number of query tiles
-    int n_seq_k;   // total key sequence length
-    int n_seq_q;   // total query sequence length
-}; 
 
 template <typename T>
 __global__ 

@@ -5,6 +5,8 @@
 #include <device_launch_parameters.h>
 #include <cmath>
 
+#pragma once
+
 // CUDA device function declarations
 
 /**

@@ -1,5 +1,239 @@
-#include <iostream> 
+#include <cuda_runtime.h>
+#include <cublas_v2.h>
+#include <iostream>
+#include <vector>
+#include <random>
+#include <cmath>
+#include <cassert>
+#include "utils.h"
+#include "flash-attention-kernel.h"
+// Helper function to check CUDA errors
+#define CUDA_CHECK(call) \
+    do { \
+        cudaError_t error = call; \
+        if (error != cudaSuccess) { \
+            std::cerr << "CUDA error at " << __FILE__ << ":" << __LINE__ << " - " << cudaGetErrorString(error) << std::endl; \
+            exit(1); \
+        } \
+    } while(0)
+
+// Helper function to initialize random data
+template <typename T>
+void init_random_data(T* data, int size, T scale = 1.0f) {
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::normal_distribution<float> dis(0.0f, scale);
+    
+    for (int i = 0; i < size; i++) {
+        data[i] = static_cast<T>(dis(gen));
+    }
+}
+
+// Reference CPU implementation for validation
+template <typename T>
+void reference_attention(const T* Q, const T* K, const T* V, T* O_ref,
+                        int batch_size, int num_heads, int seq_len_q, int seq_len_k, 
+                        int d_k, int d_v) {
+    
+    for (int b = 0; b < batch_size; b++) {
+        for (int h = 0; h < num_heads; h++) {
+            // Compute attention scores: Q * K^T
+            std::vector<T> scores(seq_len_q * seq_len_k, 0);
+            
+            for (int i = 0; i < seq_len_q; i++) {
+                for (int j = 0; j < seq_len_k; j++) {
+                    T dot_product = 0;
+                    for (int k = 0; k < d_k; k++) {
+                        int q_idx = b * num_heads * d_k * seq_len_q + h * d_k * seq_len_q + k * seq_len_q + i;
+                        int k_idx = b * num_heads * d_k * seq_len_k + h * d_k * seq_len_k + k * seq_len_k + j;
+                        dot_product += Q[q_idx] * K[k_idx];
+                    }
+                    scores[i * seq_len_k + j] = dot_product / sqrt(static_cast<T>(d_k));
+                }
+            }
+            
+            // Apply softmax
+            for (int i = 0; i < seq_len_q; i++) {
+                T max_val = scores[i * seq_len_k];
+                for (int j = 1; j < seq_len_k; j++) {
+                    max_val = std::max(max_val, scores[i * seq_len_k + j]);
+                }
+                
+                T sum_exp = 0;
+                for (int j = 0; j < seq_len_k; j++) {
+                    scores[i * seq_len_k + j] = exp(scores[i * seq_len_k + j] - max_val);
+                    sum_exp += scores[i * seq_len_k + j];
+                }
+                
+                for (int j = 0; j < seq_len_k; j++) {
+                    scores[i * seq_len_k + j] /= sum_exp;
+                }
+            }
+            
+            // Compute output: scores * V
+            for (int i = 0; i < seq_len_q; i++) {
+                for (int k = 0; k < d_v; k++) {
+                    T output_val = 0;
+                    for (int j = 0; j < seq_len_k; j++) {
+                        int v_idx = b * num_heads * d_v * seq_len_k + h * d_v * seq_len_k + k * seq_len_k + j;
+                        output_val += scores[i * seq_len_k + j] * V[v_idx];
+                    }
+                    int o_idx = b * num_heads * d_v * seq_len_q + h * d_v * seq_len_q + k * seq_len_q + i;
+                    O_ref[o_idx] = output_val;
+                }
+            }
+        }
+    }
+}
+
+// Function to compare results
+template <typename T>
+bool compare_results(const T* gpu_result, const T* cpu_result, int size, T tolerance = 1e-3) {
+    T max_diff = 0;
+    int max_diff_idx = 0;
+    
+    for (int i = 0; i < size; i++) {
+        T diff = std::abs(gpu_result[i] - cpu_result[i]);
+        if (diff > max_diff) {
+            max_diff = diff;
+            max_diff_idx = i;
+        }
+    }
+    
+    std::cout << "Max difference: " << max_diff << " at index " << max_diff_idx << std::endl;
+    std::cout << "GPU value: " << gpu_result[max_diff_idx] << ", CPU value: " << cpu_result[max_diff_idx] << std::endl;
+    
+    return max_diff < tolerance;
+}
 
 int main() {
+    // Test parameters
+    const int batch_size = 2;
+    const int num_heads = 4;
+    const int seq_len_q = 128;
+    const int seq_len_k = 128;
+    const int d_k = 64;
+    const int d_v = 64;
     
+    // Flash attention parameters
+    const int b_r = 32;  // block rows (query block size)
+    const int b_c = 32;  // block columns (key/value block size)
+    const int t_r = (seq_len_q + b_r - 1) / b_r;  // number of query tiles
+    const int t_c = (seq_len_k + b_c - 1) / b_c;  // number of key tiles
+    
+    std::cout << "Test Parameters:" << std::endl;
+    std::cout << "Batch size: " << batch_size << std::endl;
+    std::cout << "Num heads: " << num_heads << std::endl;
+    std::cout << "Seq len Q: " << seq_len_q << ", Seq len K: " << seq_len_k << std::endl;
+    std::cout << "d_k: " << d_k << ", d_v: " << d_v << std::endl;
+    std::cout << "Block size (b_r, b_c): (" << b_r << ", " << b_c << ")" << std::endl;
+    std::cout << "Tiles (t_r, t_c): (" << t_r << ", " << t_c << ")" << std::endl;
+    
+    // Calculate sizes
+    const int q_size = batch_size * num_heads * d_k * seq_len_q;
+    const int k_size = batch_size * num_heads * d_k * seq_len_k;
+    const int v_size = batch_size * num_heads * d_v * seq_len_k;
+    const int o_size = batch_size * num_heads * d_v * seq_len_q;
+    
+    // Allocate host memory
+    std::vector<float> h_Q(q_size);
+    std::vector<float> h_K(k_size);
+    std::vector<float> h_V(v_size);
+    std::vector<float> h_O(o_size);
+    std::vector<float> h_O_ref(o_size);
+    
+    // Initialize input data
+    std::cout << "Initializing input data..." << std::endl;
+    init_random_data(h_Q.data(), q_size, 0.1f);
+    init_random_data(h_K.data(), k_size, 0.1f);
+    init_random_data(h_V.data(), v_size, 0.1f);
+    
+    // Allocate device memory
+    float *d_Q, *d_K, *d_V, *d_O;
+    flash_attn_forward_params *d_params;
+    
+    CUDA_CHECK(cudaMalloc(&d_Q, q_size * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_K, k_size * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_V, v_size * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_O, o_size * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_params, sizeof(flash_attn_forward_params)));
+    
+    // Copy data to device
+    CUDA_CHECK(cudaMemcpy(d_Q, h_Q.data(), q_size * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_K, h_K.data(), k_size * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_V, h_V.data(), v_size * sizeof(float), cudaMemcpyHostToDevice));
+    
+    // Set up parameters
+    flash_attn_forward_params params;
+    params.d_k = d_k;
+    params.d_v = d_v;
+    params.b_c = b_c;
+    params.b_r = b_r;
+    params.t_c = t_c;
+    params.t_r = t_r;
+    params.n_seq_k = seq_len_k;
+    params.n_seq_q = seq_len_q;
+    
+    CUDA_CHECK(cudaMemcpy(d_params, &params, sizeof(flash_attn_forward_params), cudaMemcpyHostToDevice));
+    
+    // Launch kernel
+    std::cout << "Launching Flash Attention kernel..." << std::endl;
+    
+    dim3 grid(batch_size, num_heads);
+    dim3 block(std::min(d_k, 1024)); // Ensure block size doesn't exceed max
+    
+    // Calculate shared memory size
+    int sram_size = (b_r * d_k + b_c * d_k + b_c * d_v + b_r * d_v) * sizeof(float);
+    std::cout << "Shared memory size: " << sram_size << " bytes" << std::endl;
+    
+    // Create CUDA events for timing
+    cudaEvent_t start, stop;
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+    
+    CUDA_CHECK(cudaEventRecord(start));
+    flash_attn_forward<float><<<grid, block, sram_size>>>(d_Q, d_K, d_V, d_O, d_params);
+    CUDA_CHECK(cudaEventRecord(stop));
+    
+    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaGetLastError());
+    
+    float milliseconds = 0;
+    CUDA_CHECK(cudaEventElapsedTime(&milliseconds, start, stop));
+    std::cout << "Kernel execution time: " << milliseconds << " ms" << std::endl;
+    
+    // Copy result back to host
+    CUDA_CHECK(cudaMemcpy(h_O.data(), d_O, o_size * sizeof(float), cudaMemcpyDeviceToHost));
+    
+    // Compute reference result
+    std::cout << "Computing reference result..." << std::endl;
+    reference_attention(h_Q.data(), h_K.data(), h_V.data(), h_O_ref.data(),
+                       batch_size, num_heads, seq_len_q, seq_len_k, d_k, d_v);
+    
+    // Compare results
+    std::cout << "Comparing results..." << std::endl;
+    bool passed = compare_results(h_O.data(), h_O_ref.data(), o_size, 1e-2f);
+    
+    if (passed) {
+        std::cout << "Test PASSED!" << std::endl;
+    } else {
+        std::cout << "Test FAILED!" << std::endl;
+    }
+    
+    // Print some sample values for inspection
+    std::cout << "\nSample values comparison:" << std::endl;
+    for (int i = 0; i < std::min(10, o_size); i++) {
+        std::cout << "Index " << i << ": GPU=" << h_O[i] << ", CPU=" << h_O_ref[i] << std::endl;
+    }
+    
+    // Cleanup
+    CUDA_CHECK(cudaFree(d_Q));
+    CUDA_CHECK(cudaFree(d_K));
+    CUDA_CHECK(cudaFree(d_V));
+    CUDA_CHECK(cudaFree(d_O));
+    CUDA_CHECK(cudaFree(d_params));
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+    
+    return passed ? 0 : 1;
 }
