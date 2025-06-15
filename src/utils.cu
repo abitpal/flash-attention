@@ -26,9 +26,8 @@ __device__ _load_tile(T* tile, T* target, int n_rows, int n_cols, int thread_idx
 }
 
 template <typename T> 
-__device__ _matmul_softmax(T* q, T* k, T* v, int n_seq_q, int n_seq_k, int d_k, int thread_cnt, T* q_max, T* q_sum) {
+__device__ _matmul_softmax(T* q, T* k, T* v, T* o, int n_seq_q, int n_seq_k, int d_k, int thread_cnt, T* q_max, T* q_sum) {
     int queries_per_thread = (d_k + thread_cnt - 1) / thread_cnt; 
-
     for (int i = 0; i < n_seq_k; i++) {
         T dot_prod[queries_per_thread]; 
         for (int j = 0; j < queries_per_thread; j++) dot_prod[j] = 0.0f; 
@@ -39,11 +38,38 @@ __device__ _matmul_softmax(T* q, T* k, T* v, int n_seq_q, int n_seq_k, int d_k, 
                 dot_prod[section] += k_val * q_val; 
             }
         }
-        
-        for (int j = 0; j < queries_per_thread; j++) {
+        /* Can maybe make this more efficient by switching orfer of loop for cache efficiency? */
+        for (int j = 0, int q_col = thread_idx; j < queries_per_thread && q_col < n_seq_q; j++, q_col += thread_cnt) {
             T prev_max = q_max[j]; 
             q_max[j] = maxf(q_max[j], dot_prod[j]); 
             q_sum[j] = q_sum[j] * exp(prev_max - q_max[j]) + exp(dot_prod[j] - q_max[j]); 
+            for (int k = 0; k < d_v; k++) {
+                o[n_seq_q * k + q_col] = o[n_seq_q * k + q_col] * exp(prev_max - q_max[j]) + exp(dot_prod[j] - q_max[j]) * v[k * n_seq_k + i]; 
+            }
+        }
+    }
+}
+
+template <typename T> 
+__device__ _fill(T* arr, int size, T fill_val, int thread_cnt, int thread_idx) {
+    int val_per_thread = (size + thread_cnt - 1) / thread_cnt; 
+    for (int i = thread_idx; i < size; i += thread_cnt) {
+        arr[i] = fill_val; 
+    }
+}
+
+template <typename T> 
+__device__ _fill_single_threaded(T* arr, int size, T value) {
+    for (int i = 0; i < size; i++) {
+        arr[i] = value; 
+    }
+}
+
+template <typename T> 
+__device__ _softmax_cumdiv(T* o_i, int n_seq_q, int d_v, T* q_sum, int thread_idx, int thread_cnt) {
+    for (int i = 0; i < d_v; i++) {
+        for (int j = thread_idx, k = 0; j < n_seq_q; j += thread_cnt, ++k) {
+            o_i[i * n_seq_q + j] /= q_sum[k]; 
         }
     }
 }
