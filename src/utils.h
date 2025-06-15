@@ -16,8 +16,7 @@
  * @param n: Number of dimensions
  * @return: Pointer to the specified element
  */
-template <typename T>
-__device__ T* _get_item(T* arr, int loc[][2], int n);
+__device__ float* _get_item(float* arr, int loc[][2], int n);
 
 /**
  * Load tile data with memory coalescing optimization for warps
@@ -28,8 +27,7 @@ __device__ T* _get_item(T* arr, int loc[][2], int n);
  * @param thread_idx: Current thread index
  * @param thread_cnt: Total number of threads
  */
-template <typename T> 
-__device__ void _load_tile(T* tile, T* target, int n_rows, int n_cols, int thread_idx, int thread_cnt);
+__device__ void _load_tile(float* tile, float* target, int n_rows, int n_cols, int thread_idx, int thread_cnt);
 
 /**
  * Perform matrix multiplication with softmax for attention mechanism
@@ -40,12 +38,13 @@ __device__ void _load_tile(T* tile, T* target, int n_rows, int n_cols, int threa
  * @param n_seq_q: Sequence length for queries
  * @param n_seq_k: Sequence length for keys
  * @param d_k: Dimension of keys
+ * @param d_v: Dimension of values
  * @param thread_cnt: Total number of threads
+ * @param thread_idx: Current thread index
  * @param q_max: Array to store max values for numerical stability
  * @param q_sum: Array to store sum values for normalization
  */
-template <typename T> 
-__device__ void _matmul_softmax(T* q, T* k, T* v, T* o, int n_seq_q, int n_seq_k, int d_k, int thread_cnt, T* q_max, T* q_sum);
+__device__ void _matmul_softmax(float* q, float* k, float* v, float* o, int n_seq_q, int n_seq_k, int d_k, int d_v, int thread_cnt, int thread_idx, float* q_max, float* q_sum);
 
 /**
  * Fill array with specified value using multiple threads
@@ -55,8 +54,7 @@ __device__ void _matmul_softmax(T* q, T* k, T* v, T* o, int n_seq_q, int n_seq_k
  * @param thread_cnt: Total number of threads
  * @param thread_idx: Current thread index
  */
-template <typename T> 
-__device__ void _fill(T* arr, int size, T fill_val, int thread_cnt, int thread_idx);
+__device__ void _fill(float* arr, int size, float fill_val, int thread_cnt, int thread_idx);
 
 /**
  * Fill array with specified value using single thread
@@ -64,8 +62,7 @@ __device__ void _fill(T* arr, int size, T fill_val, int thread_cnt, int thread_i
  * @param size: Size of array
  * @param value: Value to fill with
  */
-template <typename T> 
-__device__ void _fill_single_threaded(T* arr, int size, T value);
+__device__ void _fill_single_threaded(float* arr, int size, float value);
 
 /**
  * Perform final softmax normalization division
@@ -76,24 +73,6 @@ __device__ void _fill_single_threaded(T* arr, int size, T value);
  * @param thread_idx: Current thread index
  * @param thread_cnt: Total number of threads
  */
-template <typename T> 
-__device__ void _softmax_cumdiv(T* o_i, int n_seq_q, int d_v, T* q_sum, int thread_idx, int thread_cnt);
-
-// CUDA math function wrappers for different types
-__device__ inline float maxf(float a, float b) {
-    return fmaxf(a, b);
-}
-
-__device__ inline double maxf(double a, double b) {
-    return fmax(a, b);
-}
-
-__device__ inline float exp(float x) {
-    return expf(x);
-}
-
-__device__ inline double exp(double x) {
-    return ::exp(x);
-}
+__device__ void _softmax_cumdiv(float* o_i, int n_seq_q, int d_v, float* q_sum, int thread_idx, int thread_cnt);
 
 #endif // UTILS_H

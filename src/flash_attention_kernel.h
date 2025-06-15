@@ -25,16 +25,16 @@
  * This structure encapsulates the key dimensions and tile/blocking parameters 
  * required by the FlashAttention forward kernel.
  */
-struct flash_attn_forward_params {
-    int d_k;       ///< Dimensionality of keys and queries (dot product size)
-    int d_v;       ///< Dimensionality of values (output feature size)
-    int b_c;       ///< Tile width (number of key/value columns per tile)
-    int b_r;       ///< Tile height (number of query rows per tile)
-    int t_c;       ///< Number of tiles along the key/value sequence (K/V columns)
-    int t_r;       ///< Number of tiles along the query sequence (Q rows)
-    int n_seq_k;   ///< Total key/value sequence length
-    int n_seq_q;   ///< Total query sequence length
-};
+typedef struct {
+    const int d_k;       ///< Dimensionality of keys and queries (dot product size)
+    const int d_v;       ///< Dimensionality of values (output feature size)
+    const int b_c;       ///< Tile width (number of key/value columns per tile)
+    const int b_r;       ///< Tile height (number of query rows per tile)
+    const int t_c;       ///< Number of tiles along the key/value sequence (K/V columns)
+    const int t_r;       ///< Number of tiles along the query sequence (Q rows)
+    const int n_seq_k;   ///< Total key/value sequence length
+    const int n_seq_q;   ///< Total query sequence length
+} flash_attn_forward_params; 
 
 /**
  * @brief FlashAttention forward CUDA kernel (templated).
@@ -42,7 +42,6 @@ struct flash_attn_forward_params {
  * This kernel performs the forward pass of scaled dot-product attention using
  * a shared-memory tiling strategy optimized for high throughput.
  *
- * @tparam T The data type (typically half/_Float16 or float).
  * @param Q Pointer to query matrix Q^T of shape (B, H, d_k, n_seq_q)
  * @param K Pointer to key matrix K^T of shape (B, H, d_k, n_seq_k)
  * @param V Pointer to value matrix V^T of shape (B, H, d_v, n_seq_k)
@@ -51,7 +50,5 @@ struct flash_attn_forward_params {
  * @note Output matrix O is assumed to be written to global memory
  *       within the kernel (not shown in this declaration).
  */
-template <typename T>
 __global__ 
-void flash_attn_forward(const T* Q, const T* K, const T* V,
-                        const flash_attn_forward_params* faf_param);
+void flash_attn_forward(float* Q, float* K, float* V, flash_attn_forward_params* faf_param);
