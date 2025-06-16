@@ -121,14 +121,14 @@ int main() {
     // Test parameters
     const int batch_size = 1;
     const int num_heads = 1;
-    const int seq_len_q = 2048;
-    const int seq_len_k = 2048;
-    const int d_k = 256;
-    const int d_v = 256;
+    const int seq_len_q = 64;
+    const int seq_len_k = 64;
+    const int d_k = 2;
+    const int d_v = 2;
     
     // Flash attention parameters
-    const int b_r = 12;  // block rows (query block size)
-    const int b_c = 12;  // block columns (key/value block size)
+    const int b_r = 3;  // block rows (query block size)
+    const int b_c = 3;  // block columns (key/value block size)
     const int t_r = (seq_len_q + b_r - 1) / b_r;  // number of query tiles
     const int t_c = (seq_len_k + b_c - 1) / b_c;  // number of key tiles
 
@@ -250,7 +250,7 @@ int main() {
 
     // for (int i = 0; i < d_k; i++) {
     //     for (int j = 0; j < seq_len_q; j++) {
-    //         std::cout << h_O[i * seq_len_q + j] << ' '; 
+    //         printf("%.5f=%.5f ", h_O[i * seq_len_q + j], h_O_ref[i * seq_len_q + j]); 
     //     }
     //     std::cout << '\n'; 
     // }

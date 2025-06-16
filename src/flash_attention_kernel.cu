@@ -33,35 +33,34 @@ void flash_attn_forward(float* Q, float* K, float* V, float* O, flash_attn_forwa
         // load q_i
         int loc_q_tile[4][2] = {{-1, batch_idx},{n_head, head_idx}, {d_k, 0}, {n_seq_q, 0}};
         float* q_tile = _get_item(Q, loc_q_tile, 4); 
-        // printf("start col: %d, end col: %d\n", q_idx * b_r, (q_idx + 1) * b_r - 1); 
-        _load_tile(q_tile, q_i, n_seq_q, 0, d_k - 1, q_idx * b_r, (q_idx + 1) * b_r - 1, tidx, tcount); // this is a warp-aware load that loads w/ memory coalescing
+        int true_br = min(n_seq_q, (q_idx + 1) * b_r) - q_idx * b_r; 
+        _load_tile(q_tile, q_i, n_seq_q, 0, d_k - 1, q_idx * b_r, q_idx * b_r + true_br - 1, tidx, tcount); // this is a warp-aware load that loads w/ memory coalescing
         // init o_i to 0
         _fill(o_i, b_r * d_v, 0.0f, tcount, tidx); 
         float q_max[max_queries_per_thread], q_sum[max_queries_per_thread]; 
         _fill_single_threaded(q_max, queries_per_thread, -INFINITY); 
         _fill_single_threaded(q_sum, queries_per_thread, 0.0f); 
-
         for (int k_idx = 0; k_idx < t_c; k_idx++) {
             // load k into sram
             int loc_k_tile[4][2] = {{-1, batch_idx}, {n_head, head_idx}, {d_k, 0}, {n_seq_k, 0}}; 
             int loc_v_tile[4][2] =  {{-1, batch_idx}, {n_head, head_idx}, {d_v, 0}, {n_seq_k, 0}}; 
             float* k_tile = _get_item(K, loc_k_tile, 4); 
             float* v_tile = _get_item(V, loc_v_tile, 4); 
-            _load_tile(k_tile, k_i, n_seq_k, 0, d_k - 1, k_idx * b_c, (k_idx + 1) * b_c - 1, tidx, tcount);
-            _load_tile(v_tile, v_i, n_seq_k, 0, d_v - 1, k_idx * b_c, (k_idx + 1) * b_c - 1, tidx, tcount); 
+            int true_bc = min(n_seq_k, (k_idx + 1) * b_c) - k_idx * b_c; 
+            _load_tile(k_tile, k_i, n_seq_k, 0, d_k - 1, k_idx * b_c, k_idx * b_c + true_bc - 1, tidx, tcount);
+            _load_tile(v_tile, v_i, n_seq_k, 0, d_v - 1, k_idx * b_c, k_idx * b_c + true_bc - 1, tidx, tcount); 
             __syncthreads(); 
             // compute (Q * K) * V 
-            _matmul_softmax(q_i, k_i, v_i, o_i, b_r, b_c, d_k, d_v, tcount, tidx, q_max, q_sum, scaling_factor); 
+            _matmul_softmax(q_i, k_i, v_i, o_i, true_br, true_bc, d_k, d_v, tcount, tidx, q_max, q_sum, scaling_factor); 
         }
         // final update on o_i w/ the softmax division
-        _softmax_cumdiv(o_i, b_r, d_v, q_sum, tidx, tcount); 
-
+        _softmax_cumdiv(o_i, true_br, d_v, q_sum, tidx, tcount); 
         // write back O to HBM
         for (int i = 0; i < d_v; i++) {
-            for (int j = tidx; j < b_r; j += tcount) {
+            for (int j = tidx; j < true_br; j += tcount) {
                 int loc_O[4][2] = {{-1, batch_idx}, {n_head, head_idx}, {d_v, i}, {n_seq_q, j + q_idx * b_r}}; 
                 float* O_idx = _get_item(O, loc_O, 4); 
-                *O_idx = o_i[i * b_r + j]; 
+                *O_idx = o_i[i * true_br + j]; 
             }
         }
         __syncthreads(); 
