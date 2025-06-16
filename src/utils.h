@@ -20,14 +20,17 @@ __device__ float* _get_item(float* arr, int loc[][2], int n);
 
 /**
  * Load tile data with memory coalescing optimization for warps
- * @param tile: Source tile data
+ * @param source: Source tile data
  * @param target: Destination array
- * @param n_rows: Number of rows in tile
- * @param n_cols: Number of columns in tile
- * @param thread_idx: Current thread index
- * @param thread_cnt: Total number of threads
+ * @param n: amount of columns in source
+ * @param start_row: Number of rows in tile
+ * @param end_row: Number of columns in tile
+ * @param start_col: Current thread index
+ * @param end_col: Total number of threads
+ * @param thread_idx: Thread index
+ * @param thread_cnt: Amount of threads in the block
  */
-__device__ void _load_tile(float* tile, float* target, int n_rows, int n_cols, int thread_idx, int thread_cnt);
+__device__ void _load_tile(float* source, float* target, int n, int start_row, int end_row, int start_col, int end_col, int thread_idx, int thread_cnt); 
 
 /**
  * Perform matrix multiplication with softmax for attention mechanism
@@ -44,7 +47,7 @@ __device__ void _load_tile(float* tile, float* target, int n_rows, int n_cols, i
  * @param q_max: Array to store max values for numerical stability
  * @param q_sum: Array to store sum values for normalization
  */
-__device__ void _matmul_softmax(float* q, float* k, float* v, float* o, int n_seq_q, int n_seq_k, int d_k, int d_v, int thread_cnt, int thread_idx, float* q_max, float* q_sum);
+__device__ void _matmul_softmax(float* q, float* k, float* v, float* o, int n_seq_q, int n_seq_k, int d_k, int d_v, int thread_cnt, int thread_idx, float* q_max, float* q_sum, float scaling_factor);
 
 /**
  * Fill array with specified value using multiple threads

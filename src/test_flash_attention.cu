@@ -6,6 +6,8 @@
 #include <cmath>
 #include <cassert>
 #include "flash_attention_kernel.h"
+#include <cmath>
+
 // Helper function to check CUDA errors
 #define CUDA_CHECK(call) \
     do { \
@@ -47,7 +49,7 @@ void reference_attention(const T* Q, const T* K, const T* V, T* O_ref,
                         int k_idx = b * num_heads * d_k * seq_len_k + h * d_k * seq_len_k + k * seq_len_k + j;
                         dot_product += Q[q_idx] * K[k_idx];
                     }
-                    scores[i * seq_len_k + j] = dot_product / sqrt(static_cast<T>(d_k));
+                    scores[i * seq_len_k + j] = dot_product; 
                 }
             }
             
@@ -107,16 +109,16 @@ bool compare_results(const T* gpu_result, const T* cpu_result, int size, T toler
 
 int main() {
     // Test parameters
-    const int batch_size = 2;
-    const int num_heads = 4;
-    const int seq_len_q = 128;
-    const int seq_len_k = 128;
-    const int d_k = 64;
-    const int d_v = 64;
+    const int batch_size = 1;
+    const int num_heads = 1;
+    const int seq_len_q = 4;
+    const int seq_len_k = 4;
+    const int d_k = 2;
+    const int d_v = 2;
     
     // Flash attention parameters
-    const int b_r = 32;  // block rows (query block size)
-    const int b_c = 32;  // block columns (key/value block size)
+    const int b_r = 2;  // block rows (query block size)
+    const int b_c = 2;  // block columns (key/value block size)
     const int t_r = (seq_len_q + b_r - 1) / b_r;  // number of query tiles
     const int t_c = (seq_len_k + b_c - 1) / b_c;  // number of key tiles
     
@@ -163,7 +165,7 @@ int main() {
     CUDA_CHECK(cudaMemcpy(d_V, h_V.data(), v_size * sizeof(float), cudaMemcpyHostToDevice));
     
     // Set up parameters
-    flash_attn_forward_params params = {.d_k = d_k, .d_v = d_v, .b_c = b_c, .b_r = b_r, .t_c = t_c, .t_r = t_r, .n_seq_k = seq_len_k, .n_seq_q = seq_len_q}; 
+    flash_attn_forward_params params = {.d_k = d_k, .d_v = d_v, .b_c = b_c, .b_r = b_r, .t_c = t_c, .t_r = t_r, .n_seq_k = seq_len_k, .n_seq_q = seq_len_q, .scaling_factor=1.0f}; 
     // params.d_k = d_k;
     // params.d_v = d_v;
     // params.b_c = b_c;
@@ -179,11 +181,20 @@ int main() {
     std::cout << "Launching Flash Attention kernel..." << std::endl;
     
     dim3 grid(batch_size, num_heads);
-    dim3 block(std::min(d_k, 1024)); // Ensure block size doesn't exceed max
+    dim3 block(b_r); // Ensure block size doesn't exceed max
     
     // Calculate shared memory size
     int sram_size = (b_r * d_k + b_c * d_k + b_c * d_v + b_r * d_v) * sizeof(float);
     std::cout << "Shared memory size: " << sram_size << " bytes" << std::endl;
+
+    std::cout << "Query:\n"; 
+    for (int i = 0; i < d_k; i++) {
+        for (int j = 0; j < seq_len_q; j++) {
+            std::cout << h_Q[i * seq_len_q + j] << ' '; 
+        }
+        std::cout << '\n'; 
+    }
+    std::cout << '\n'; 
     
     // Create CUDA events for timing
     cudaEvent_t start, stop;
@@ -191,7 +202,7 @@ int main() {
     CUDA_CHECK(cudaEventCreate(&stop));
     
     CUDA_CHECK(cudaEventRecord(start));
-    flash_attn_forward<<<1, 1, sram_size>>>(d_Q, d_K, d_V, d_params);
+    flash_attn_forward<<<grid, block, sram_size>>>(d_Q, d_K, d_V, d_O, d_params);
     CUDA_CHECK(cudaEventRecord(stop));
     
     CUDA_CHECK(cudaDeviceSynchronize());
@@ -201,29 +212,38 @@ int main() {
     CUDA_CHECK(cudaEventElapsedTime(&milliseconds, start, stop));
     std::cout << "Kernel execution time: " << milliseconds << " ms" << std::endl;
     
-    // // Copy result back to host
-    // CUDA_CHECK(cudaMemcpy(h_O.data(), d_O, o_size * sizeof(float), cudaMemcpyDeviceToHost));
+    // Copy result back to host
+    CUDA_CHECK(cudaMemcpy(h_O.data(), d_O, o_size * sizeof(float), cudaMemcpyDeviceToHost));
     
-    // // Compute reference result
-    // std::cout << "Computing reference result..." << std::endl;
-    // reference_attention(h_Q.data(), h_K.data(), h_V.data(), h_O_ref.data(),
-    //                    batch_size, num_heads, seq_len_q, seq_len_k, d_k, d_v);
+    // Compute reference result
+    std::cout << "Computing reference result..." << std::endl;
+    reference_attention(h_Q.data(), h_K.data(), h_V.data(), h_O_ref.data(),
+                       batch_size, num_heads, seq_len_q, seq_len_k, d_k, d_v);
     
-    // // Compare results
-    // std::cout << "Comparing results..." << std::endl;
-    // bool passed = compare_results(h_O.data(), h_O_ref.data(), o_size, 1e-2f);
+    // Compare results
+    std::cout << "Comparing results..." << std::endl;
+    bool passed = compare_results(h_O.data(), h_O_ref.data(), o_size, 1e-2f);
     
-    // if (passed) {
-    //     std::cout << "Test PASSED!" << std::endl;
-    // } else {
-    //     std::cout << "Test FAILED!" << std::endl;
-    // }
+    if (passed) {
+        std::cout << "Test PASSED!" << std::endl;
+    } else {
+        std::cout << "Test FAILED!" << std::endl;
+    }
     
-    // // Print some sample values for inspection
-    // std::cout << "\nSample values comparison:" << std::endl;
-    // for (int i = 0; i < std::min(10, o_size); i++) {
-    //     std::cout << "Index " << i << ": GPU=" << h_O[i] << ", CPU=" << h_O_ref[i] << std::endl;
-    // }
+    // Print some sample values for inspection
+    std::cout << "\nSample values comparison:" << std::endl;
+    for (int i = 0; i < std::min(10, o_size); i++) {
+        std::cout << "Index " << i << ": GPU=" << h_O[i] << ", CPU=" << h_O_ref[i] << std::endl;
+    }
+
+    // print O
+
+    for (int i = 0; i < d_k; i++) {
+        for (int j = 0; j < seq_len_q; j++) {
+            std::cout << h_O[i * seq_len_q + j] << ' '; 
+        }
+        std::cout << '\n'; 
+    }
     
     // Cleanup
     CUDA_CHECK(cudaFree(d_Q));

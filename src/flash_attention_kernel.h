@@ -34,6 +34,7 @@ typedef struct {
     const int t_r;       ///< Number of tiles along the query sequence (Q rows)
     const int n_seq_k;   ///< Total key/value sequence length
     const int n_seq_q;   ///< Total query sequence length
+    const float scaling_factor; ///< Scaling factor on the softmax
 } flash_attn_forward_params; 
 
 /**
@@ -51,4 +52,4 @@ typedef struct {
  *       within the kernel (not shown in this declaration).
  */
 __global__ 
-void flash_attn_forward(float* Q, float* K, float* V, flash_attn_forward_params* faf_param);
+void flash_attn_forward(float* Q, float* K, float* V, float* O, flash_attn_forward_params* faf_param);
