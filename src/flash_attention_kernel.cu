@@ -51,7 +51,7 @@ void flash_attn_forward(float* Q, float* K, float* V, float* O, flash_attn_forwa
             _load_tile(v_tile, v_i, n_seq_k, 0, d_v - 1, k_idx * b_c, (k_idx + 1) * b_c - 1, tidx, tcount); 
             __syncthreads(); 
             // compute (Q * K) * V 
-            _matmul_softmax(q_i, k_i, v_i, o_i, b_r, b_c, d_k, d_v, tcount, tidx, q_max, q_sum, 1.0f); 
+            _matmul_softmax(q_i, k_i, v_i, o_i, b_r, b_c, d_k, d_v, tcount, tidx, q_max, q_sum, scaling_factor); 
         }
         // final update on o_i w/ the softmax division
         _softmax_cumdiv(o_i, b_r, d_v, q_sum, tidx, tcount); 

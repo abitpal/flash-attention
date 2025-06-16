@@ -49,7 +49,7 @@ void reference_attention(const T* Q, const T* K, const T* V, T* O_ref,
                         int k_idx = b * num_heads * d_k * seq_len_k + h * d_k * seq_len_k + k * seq_len_k + j;
                         dot_product += Q[q_idx] * K[k_idx];
                     }
-                    scores[i * seq_len_k + j] = dot_product; 
+                    scores[i * seq_len_k + j] = dot_product / sqrt(static_cast<T>(d_k));
                 }
             }
             
@@ -108,19 +108,33 @@ bool compare_results(const T* gpu_result, const T* cpu_result, int size, T toler
 }
 
 int main() {
+
+    int device = 0; 
+    cudaDeviceProp prop;
+
+    cudaGetDevice(&device);
+    cudaGetDeviceProperties(&prop, device);
+
+    std::cout << "Device: " << prop.name << std::endl;
+    std::cout << "Shared memory per block: " << prop.sharedMemPerBlock << " bytes" << std::endl;
+
     // Test parameters
     const int batch_size = 1;
     const int num_heads = 1;
-    const int seq_len_q = 4;
-    const int seq_len_k = 4;
-    const int d_k = 2;
-    const int d_v = 2;
+    const int seq_len_q = 2048;
+    const int seq_len_k = 2048;
+    const int d_k = 256;
+    const int d_v = 256;
     
     // Flash attention parameters
-    const int b_r = 2;  // block rows (query block size)
-    const int b_c = 2;  // block columns (key/value block size)
+    const int b_r = 12;  // block rows (query block size)
+    const int b_c = 12;  // block columns (key/value block size)
     const int t_r = (seq_len_q + b_r - 1) / b_r;  // number of query tiles
     const int t_c = (seq_len_k + b_c - 1) / b_c;  // number of key tiles
+
+    int sram_size = (b_r * d_k + b_c * d_k + b_c * d_v + b_r * d_v) * sizeof(float); // = (b_r + b_c) * (d_k + d_v)
+    std::cout << "Shared memory size: " << sram_size << " bytes" << std::endl;
+    assert((sram_size <= prop.sharedMemPerBlock)); 
     
     std::cout << "Test Parameters:" << std::endl;
     std::cout << "Batch size: " << batch_size << std::endl;
@@ -165,7 +179,7 @@ int main() {
     CUDA_CHECK(cudaMemcpy(d_V, h_V.data(), v_size * sizeof(float), cudaMemcpyHostToDevice));
     
     // Set up parameters
-    flash_attn_forward_params params = {.d_k = d_k, .d_v = d_v, .b_c = b_c, .b_r = b_r, .t_c = t_c, .t_r = t_r, .n_seq_k = seq_len_k, .n_seq_q = seq_len_q, .scaling_factor=1.0f}; 
+    flash_attn_forward_params params = {.d_k = d_k, .d_v = d_v, .b_c = b_c, .b_r = b_r, .t_c = t_c, .t_r = t_r, .n_seq_k = seq_len_k, .n_seq_q = seq_len_q, .scaling_factor=1.0f/sqrtf(static_cast<float>(d_k))}; 
     // params.d_k = d_k;
     // params.d_v = d_v;
     // params.b_c = b_c;
@@ -182,19 +196,15 @@ int main() {
     
     dim3 grid(batch_size, num_heads);
     dim3 block(b_r); // Ensure block size doesn't exceed max
-    
-    // Calculate shared memory size
-    int sram_size = (b_r * d_k + b_c * d_k + b_c * d_v + b_r * d_v) * sizeof(float);
-    std::cout << "Shared memory size: " << sram_size << " bytes" << std::endl;
 
-    std::cout << "Query:\n"; 
-    for (int i = 0; i < d_k; i++) {
-        for (int j = 0; j < seq_len_q; j++) {
-            std::cout << h_Q[i * seq_len_q + j] << ' '; 
-        }
-        std::cout << '\n'; 
-    }
-    std::cout << '\n'; 
+    // std::cout << "Query:\n"; 
+    // for (int i = 0; i < d_k; i++) {
+    //     for (int j = 0; j < seq_len_q; j++) {
+    //         std::cout << h_Q[i * seq_len_q + j] << ' '; 
+    //     }
+    //     std::cout << '\n'; 
+    // }
+    // std::cout << '\n'; 
     
     // Create CUDA events for timing
     cudaEvent_t start, stop;
@@ -238,12 +248,12 @@ int main() {
 
     // print O
 
-    for (int i = 0; i < d_k; i++) {
-        for (int j = 0; j < seq_len_q; j++) {
-            std::cout << h_O[i * seq_len_q + j] << ' '; 
-        }
-        std::cout << '\n'; 
-    }
+    // for (int i = 0; i < d_k; i++) {
+    //     for (int j = 0; j < seq_len_q; j++) {
+    //         std::cout << h_O[i * seq_len_q + j] << ' '; 
+    //     }
+    //     std::cout << '\n'; 
+    // }
     
     // Cleanup
     CUDA_CHECK(cudaFree(d_Q));
