@@ -118,6 +118,8 @@ int main() {
     std::cout << "Device: " << prop.name << std::endl;
     std::cout << "Shared memory per block: " << prop.sharedMemPerBlock << " bytes" << std::endl;
 
+    int sram_size_limit = prop.sharedMemPerBlock; 
+
     // Test parameters
     const int batch_size = 1;
     const int num_heads = 1;
@@ -127,12 +129,15 @@ int main() {
     const int d_v = 2;
     
     // Flash attention parameters
-    const int b_r = 3;  // block rows (query block size)
-    const int b_c = 3;  // block columns (key/value block size)
+    const int b_r = sram_size_limit / (d_k + d_v) / 2;  // block rows (query block size)
+    const int b_c = sram_size_limit / (d_k + d_v) / 2;  // block columns (key/value block size)
     const int t_r = (seq_len_q + b_r - 1) / b_r;  // number of query tiles
     const int t_c = (seq_len_k + b_c - 1) / b_c;  // number of key tiles
 
     int sram_size = (b_r * d_k + b_c * d_k + b_c * d_v + b_r * d_v) * sizeof(float); // = (b_r + b_c) * (d_k + d_v)
+    /*
+    sram_size / (d_k + d_v) / 2
+    */
     std::cout << "Shared memory size: " << sram_size << " bytes" << std::endl;
     assert((sram_size <= prop.sharedMemPerBlock)); 
     
