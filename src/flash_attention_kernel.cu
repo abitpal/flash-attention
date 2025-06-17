@@ -35,6 +35,7 @@ void flash_attn_forward(float* Q, float* K, float* V, float* O, flash_attn_forwa
         float* q_tile = _get_item(Q, loc_q_tile, 4); 
         int true_br = min(n_seq_q, (q_idx + 1) * b_r) - q_idx * b_r; 
         _load_tile(q_tile, q_i, n_seq_q, 0, d_k - 1, q_idx * b_r, q_idx * b_r + true_br - 1, tidx, tcount); // this is a warp-aware load that loads w/ memory coalescing
+        // printf("loaded tiles: %.5f %.5f, for index %d\n", q_i[tidx], q_i[tcount + tidx], q_idx); 
         // init o_i to 0
         _fill(o_i, b_r * d_v, 0.0f, tcount, tidx); 
         float q_max[max_queries_per_thread], q_sum[max_queries_per_thread]; 
@@ -51,6 +52,7 @@ void flash_attn_forward(float* Q, float* K, float* V, float* O, flash_attn_forwa
             _load_tile(v_tile, v_i, n_seq_k, 0, d_v - 1, k_idx * b_c, k_idx * b_c + true_bc - 1, tidx, tcount); 
             __syncthreads(); 
             // compute (Q * K) * V 
+            // printf("loaded tiles: %.5f %.5f, for index %d\n", k_i[0], k_i[1], k_idx); 
             _matmul_softmax(q_i, k_i, v_i, o_i, true_br, true_bc, d_k, d_v, tcount, tidx, q_max, q_sum, scaling_factor); 
         }
         // final update on o_i w/ the softmax division

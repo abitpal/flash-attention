@@ -1,1 +1,1 @@
-const int max_queries_per_thread = 1; 
+const int max_queries_per_thread = 1024; 

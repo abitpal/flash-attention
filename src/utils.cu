@@ -32,7 +32,7 @@ __device__ void _matmul_softmax(
     int thread_cnt, int thread_idx,
     float* q_max, float* q_sum, float scaling_factor=1.0f
 ) {
-    int queries_per_thread = (d_k + thread_cnt - 1) / thread_cnt; 
+    int queries_per_thread = (n_seq_q + thread_cnt - 1) / thread_cnt; 
     for (int i = 0; i < n_seq_k; i++) {
         float dot_prod[max_queries_per_thread];  
         for (int j = 0; j < queries_per_thread; j++) dot_prod[j] = 0.0f; 
