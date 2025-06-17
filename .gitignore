@@ -1,3 +1,4 @@
 src/*.o
 build/*
 !build/.gitkeep
+scratch/
