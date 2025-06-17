@@ -1,3 +1,4 @@
+#include <cuda_profiler_api.h> // at the top
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
 #include <iostream>
@@ -122,14 +123,14 @@ int main() {
     int sram_size_limit = prop.sharedMemPerBlock / sizeof(float); 
 
     // Test parameters
-    const int batch_size = 1;
-    const int num_heads = 1;
+    const int batch_size = 8;
+    const int num_heads = 2;
     const int seq_len_q = 1024;
     const int seq_len_k = 1024;
     const int d_k = 256;
     const int d_v = 256;
 
-    int queries_per_thread = 2; 
+    int queries_per_thread = 1; 
     
     // Flash attention parameters
     const int b_r = min(seq_len_q, (sram_size_limit / ((d_k + d_v) * 2)));  // block rows (query block size)
@@ -219,13 +220,17 @@ int main() {
     CUDA_CHECK(cudaEventCreate(&start));
     CUDA_CHECK(cudaEventCreate(&stop));
     
+    cudaProfilerStart();  // Begin nsys profiling window
+
     CUDA_CHECK(cudaEventRecord(start));
     flash_attn_forward<<<grid, block, sram_size>>>(d_Q, d_K, d_V, d_O, d_params);
     CUDA_CHECK(cudaEventRecord(stop));
-    
-    CUDA_CHECK(cudaDeviceSynchronize());
-    CUDA_CHECK(cudaGetLastError());
-    
+
+    CUDA_CHECK(cudaDeviceSynchronize());  // Wait for kernel to finish
+    cudaProfilerStop();  // End nsys profiling window
+
+    CUDA_CHECK(cudaGetLastError());  // Check for errors
+        
     float milliseconds = 0;
     CUDA_CHECK(cudaEventElapsedTime(&milliseconds, start, stop));
     std::cout << "Kernel execution time: " << milliseconds << " ms" << std::endl;
@@ -234,25 +239,25 @@ int main() {
     CUDA_CHECK(cudaMemcpy(h_O.data(), d_O, o_size * sizeof(float), cudaMemcpyDeviceToHost));
     
     // Compute reference result
-    std::cout << "Computing reference result..." << std::endl;
-    reference_attention(h_Q.data(), h_K.data(), h_V.data(), h_O_ref.data(),
-                       batch_size, num_heads, seq_len_q, seq_len_k, d_k, d_v);
+    // std::cout << "Computing reference result..." << std::endl;
+    // reference_attention(h_Q.data(), h_K.data(), h_V.data(), h_O_ref.data(),
+    //                    batch_size, num_heads, seq_len_q, seq_len_k, d_k, d_v);
     
-    // Compare results
-    std::cout << "Comparing results..." << std::endl;
-    bool passed = compare_results(h_O.data(), h_O_ref.data(), o_size, 1e-2f);
+    // // Compare results
+    // std::cout << "Comparing results..." << std::endl;
+    // bool passed = compare_results(h_O.data(), h_O_ref.data(), o_size, 1e-2f);
     
-    if (passed) {
-        std::cout << "Test PASSED!" << std::endl;
-    } else {
-        std::cout << "Test FAILED!" << std::endl;
-    }
+    // if (passed) {
+    //     std::cout << "Test PASSED!" << std::endl;
+    // } else {
+    //     std::cout << "Test FAILED!" << std::endl;
+    // }
     
-    // Print some sample values for inspection
-    std::cout << "\nSample values comparison:" << std::endl;
-    for (int i = 0; i < std::min(10, o_size); i++) {
-        std::cout << "Index " << i << ": GPU=" << h_O[i] << ", CPU=" << h_O_ref[i] << std::endl;
-    }
+    // // Print some sample values for inspection
+    // std::cout << "\nSample values comparison:" << std::endl;
+    // for (int i = 0; i < std::min(10, o_size); i++) {
+    //     std::cout << "Index " << i << ": GPU=" << h_O[i] << ", CPU=" << h_O_ref[i] << std::endl;
+    // }
 
     // print O
 

@@ -2,7 +2,8 @@
 
 NVCC = nvcc
 PROFILER = nvprof
-CFLAGS = -arch=sm_70 -O3
+PROFILER_FLAGS = 
+CFLAGS = -arch=sm_70 -O3 -lineinfo
 LIBS = -lcublas
 
 # Directories
@@ -34,7 +35,7 @@ $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
 profile: $(TARGET)
-	$(PROFILER) $(TARGET)
+	$(PROFILER) $(PROFILER_FLAGS) $(TARGET)
 
 clean:
 	rm -f $(BUILD_DIR)/*.o $(TARGET)
