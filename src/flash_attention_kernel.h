@@ -52,4 +52,7 @@ typedef struct {
  *       within the kernel (not shown in this declaration).
  */
 __global__ 
-void flash_attn_forward(float* Q, float* K, float* V, float* O, flash_attn_forward_params* faf_param);
+void flash_attn_forward(
+    float* Q, float* K, float* V, float* O, const int b_c, const int b_r, const int t_c, 
+    const int t_r, const int n_seq_k, const int n_seq_q,
+    const int d_k, const float scaling_factor); 

@@ -5,67 +5,64 @@
 #include <cstdio> 
 
 __global__ 
-void flash_attn_forward(float* Q, float* K, float* V, float* O, flash_attn_forward_params* faf_param) {
-    int tidx = threadIdx.x; // index of the specific row, d_idx < d_k
-    int tcount = blockDim.x; 
+void flash_attn_forward(
+    float* Q, float* K, float* V, float* O, const int b_c, const int b_r, const int t_c, 
+    const int t_r, const int n_seq_k, const int n_seq_q,
+    const int d_k, const float scaling_factor) {
+    int thread_x = threadIdx.x, thread_y = threadIdx.y; 
+    int tcount_x = blockDim.x, tcount_y = blockDim.y; 
+    int tid = thread_y * tcount_x + thread_x; 
     int batch_idx = blockIdx.x, head_idx = blockIdx.y;  // batch and head index
     int n_head = gridDim.y; 
-
-    const int b_c = faf_param->b_c, b_r = faf_param->b_r, t_c = faf_param->t_c, t_r = faf_param->t_r; 
-    const int d_k = faf_param->d_k, d_v = faf_param->d_v; 
-    const int n_seq_k = faf_param->n_seq_k, n_seq_q = faf_param->n_seq_q; 
-    const float scaling_factor = faf_param->scaling_factor; 
-
-    int queries_per_thread = (b_r + tcount - 1) / tcount; // not on sram --> storage on register
 
     extern __shared__ float sram []; 
     float* q_i = sram; 
     float* k_i = sram + b_r * d_k; 
     float* v_i = k_i + b_c * d_k; 
-    float* o_i = v_i + b_c * d_v; 
+    float* o_i = v_i + b_c * d_k; 
 
-    // printf("queries per thread: %d, d_k: %d tcount: %d\n", queries_per_thread, d_k, tcount); 
-    assert((queries_per_thread <= max_queries_per_thread)); 
+    Q += (batch_idx * n_head * n_seq_q * d_k) + head_idx * (n_seq_q * d_k); 
 
     // https://siboehm.com/articles/22/CUDA-MMM Global Memory Coalescing
-
     for (int q_idx = 0; q_idx < t_r; q_idx++) {
-        // load q_i
-        int loc_q_tile[4][2] = {{-1, batch_idx},{n_head, head_idx}, {d_k, 0}, {n_seq_q, 0}};
-        float* q_tile = _get_item(Q, loc_q_tile, 4); 
-        int true_br = min(n_seq_q, (q_idx + 1) * b_r) - q_idx * b_r; 
-        _load_tile(q_tile, q_i, n_seq_q, 0, d_k - 1, q_idx * b_r, q_idx * b_r + true_br - 1, tidx, tcount); // this is a warp-aware load that loads w/ memory coalescing
-        // printf("loaded tiles: %.5f %.5f, for index %d\n", q_i[tidx], q_i[tcount + tidx], q_idx); 
-        // init o_i to 0
-        _fill(o_i, b_r * d_v, 0.0f, tcount, tidx); 
-        float q_max[max_queries_per_thread], q_sum[max_queries_per_thread]; 
-        _fill_single_threaded(q_max, queries_per_thread, -INFINITY); 
-        _fill_single_threaded(q_sum, queries_per_thread, 0.0f); 
-        for (int k_idx = 0; k_idx < t_c; k_idx++) {
-            // load k into sram
-            int loc_k_tile[4][2] = {{-1, batch_idx}, {n_head, head_idx}, {d_k, 0}, {n_seq_k, 0}}; 
-            int loc_v_tile[4][2] =  {{-1, batch_idx}, {n_head, head_idx}, {d_v, 0}, {n_seq_k, 0}}; 
-            float* k_tile = _get_item(K, loc_k_tile, 4); 
-            float* v_tile = _get_item(V, loc_v_tile, 4); 
-            int true_bc = min(n_seq_k, (k_idx + 1) * b_c) - k_idx * b_c; 
-            _load_tile(k_tile, k_i, n_seq_k, 0, d_k - 1, k_idx * b_c, k_idx * b_c + true_bc - 1, tidx, tcount);
-            _load_tile(v_tile, v_i, n_seq_k, 0, d_v - 1, k_idx * b_c, k_idx * b_c + true_bc - 1, tidx, tcount); 
-            __syncthreads(); 
-            // compute (Q * K) * V 
-            // printf("loaded tiles: %.5f %.5f, for index %d\n", k_i[0], k_i[1], k_idx); 
-            _matmul_softmax(q_i, k_i, v_i, o_i, true_br, true_bc, d_k, d_v, tcount, tidx, q_max, q_sum, scaling_factor); 
-        }
-        // final update on o_i w/ the softmax division
-        _softmax_cumdiv(o_i, true_br, d_v, q_sum, tidx, tcount); 
-        // write back O to HBM
-        for (int i = 0; i < d_v; i++) {
-            for (int j = tidx; j < true_br; j += tcount) {
-                int loc_O[4][2] = {{-1, batch_idx}, {n_head, head_idx}, {d_v, i}, {n_seq_q, j + q_idx * b_r}}; 
-                float* O_idx = _get_item(O, loc_O, 4); 
-                *O_idx = o_i[i * true_br + j]; 
+        int true_br = min(n_seq_q, (q_idx + 1) * b_r) - b_r * q_idx; 
+        for (int i = thread_y; i < true_br; i += tcount_y) {
+            int off_set_i = i * d_k; 
+            for (int j = thread_x; j < d_k; j += tcount_x) {
+                q_i[off_set_i + j] = Q[(i + q_idx * b_r) * d_k + j];
+                o_i[off_set_i + j] = 0; 
             }
         }
         __syncthreads(); 
+
+        for (int k_idx = 0; k_idx < t_c; k_idx++) {
+            int true_bc = min(n_seq_k, (k_idx + 1) * b_c) - b_c * k_idx; 
+            for (int i = thread_y; i < true_bc; i += tcount_y) {
+                for (int j = thread_x; j < d_k; j += tcount_x) {
+                    // float k_val = K[(i + k_idx * b_c) * d_k + j]; 
+                    k_i[i * d_k + j] = K[(i + k_idx * b_c) * d_k + j]; 
+                    v_i[i * d_k + j] = V[(i + k_idx * b_c) * d_k + j]; 
+                }
+            }
+            __syncthreads();
+            for (int i = thread_y; i < true_br; i += tcount_y) {
+                for (int j = 0; j < true_bc; j++) {
+                    float sum = 0; 
+                    for (int k = 0; k < d_k; k++) {
+                        sum += k_i[j * d_k + k] * q_i[i * d_k + k]; 
+                    }
+                    for (int k = thread_x; k < d_k; k+=tcount_x) {
+                        o_i[i * d_k + k] += sum * v_i[j * d_k + k]; 
+                    }
+                }
+            }
+            // for (int i = 0; i < true_bc; i++) {
+            //     for (int j = thread_y; j < true_bc; j += tcount_y) {
+            //         for (int k = thread_x; k < true_)
+            //     }
+            // }
+
+        }
     }
 }
 

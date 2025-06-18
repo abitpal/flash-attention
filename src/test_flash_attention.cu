@@ -32,7 +32,6 @@ void init_random_data(T* data, int size, T scale = 1.0f) {
     }
 }
 
-// Reference CPU implementation for validation
 template <typename T>
 void reference_attention(const T* Q, const T* K, const T* V, T* O_ref,
                         int batch_size, int num_heads, int seq_len_q, int seq_len_k, 
@@ -47,8 +46,9 @@ void reference_attention(const T* Q, const T* K, const T* V, T* O_ref,
                 for (int j = 0; j < seq_len_k; j++) {
                     T dot_product = 0;
                     for (int k = 0; k < d_k; k++) {
-                        int q_idx = b * num_heads * d_k * seq_len_q + h * d_k * seq_len_q + k * seq_len_q + i;
-                        int k_idx = b * num_heads * d_k * seq_len_k + h * d_k * seq_len_k + k * seq_len_k + j;
+                        // Updated indexing for shape (b, nh, seq_len, d_k)
+                        int q_idx = b * num_heads * seq_len_q * d_k + h * seq_len_q * d_k + i * d_k + k;
+                        int k_idx = b * num_heads * seq_len_k * d_k + h * seq_len_k * d_k + j * d_k + k;
                         dot_product += Q[q_idx] * K[k_idx];
                     }
                     scores[i * seq_len_k + j] = dot_product / sqrt(static_cast<T>(d_k));
@@ -78,10 +78,12 @@ void reference_attention(const T* Q, const T* K, const T* V, T* O_ref,
                 for (int k = 0; k < d_v; k++) {
                     T output_val = 0;
                     for (int j = 0; j < seq_len_k; j++) {
-                        int v_idx = b * num_heads * d_v * seq_len_k + h * d_v * seq_len_k + k * seq_len_k + j;
+                        // Updated indexing for shape (b, nh, seq_len, d_v)
+                        int v_idx = b * num_heads * seq_len_k * d_v + h * seq_len_k * d_v + j * d_v + k;
                         output_val += scores[i * seq_len_k + j] * V[v_idx];
                     }
-                    int o_idx = b * num_heads * d_v * seq_len_q + h * d_v * seq_len_q + k * seq_len_q + i;
+                    // Updated indexing for output shape (b, nh, seq_len, d_v)
+                    int o_idx = b * num_heads * seq_len_q * d_v + h * seq_len_q * d_v + i * d_v + k;
                     O_ref[o_idx] = output_val;
                 }
             }
@@ -125,10 +127,11 @@ int main() {
     // Test parameters
     const int batch_size = 8;
     const int num_heads = 2;
-    const int seq_len_q = 1024;
-    const int seq_len_k = 1024;
+    const int seq_len_q = 1024; 
+    const int seq_len_k = 1024; 
     const int d_k = 256;
     const int d_v = 256;
+    const float scaling_factor = 1.0f/sqrtf(static_cast<float>(d_k)); 
 
     int queries_per_thread = 1; 
     
@@ -186,25 +189,16 @@ int main() {
     CUDA_CHECK(cudaMemcpy(d_Q, h_Q.data(), q_size * sizeof(float), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_K, h_K.data(), k_size * sizeof(float), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_V, h_V.data(), v_size * sizeof(float), cudaMemcpyHostToDevice));
-    
-    // Set up parameters
-    flash_attn_forward_params params = {.d_k = d_k, .d_v = d_v, .b_c = b_c, .b_r = b_r, .t_c = t_c, .t_r = t_r, .n_seq_k = seq_len_k, .n_seq_q = seq_len_q, .scaling_factor=1.0f/sqrtf(static_cast<float>(d_k))}; 
-    // params.d_k = d_k;
-    // params.d_v = d_v;
-    // params.b_c = b_c;
-    // params.b_r = b_r;
-    // params.t_c = t_c;
-    // params.t_r = t_r;
-    // params.n_seq_k = seq_len_k;
-    // params.n_seq_q = seq_len_q;
-    
-    CUDA_CHECK(cudaMemcpy(d_params, &params, sizeof(flash_attn_forward_params), cudaMemcpyHostToDevice));
-    
+            
     // Launch kernel
     std::cout << "Launching Flash Attention kernel..." << std::endl;
     
     dim3 grid(batch_size, num_heads);
-    dim3 block(b_r / queries_per_thread); // Ensure block size doesn't exceed max
+    int block_x = min(32, b_r); 
+    int block_y = 1024/block_x; 
+    dim3 block(block_y, block_x); // Ensure block size doesn't exceed max
+
+    // std::cout << "Block dim: " << 1024 / b_r << ' ' << b_r << '\n'; 
 
     // std::cout << "Key:\n"; 
     // for (int i = 0; i < d_k; i++) {
@@ -223,7 +217,7 @@ int main() {
     cudaProfilerStart();  // Begin nsys profiling window
 
     CUDA_CHECK(cudaEventRecord(start));
-    flash_attn_forward<<<grid, block, sram_size>>>(d_Q, d_K, d_V, d_O, d_params);
+    flash_attn_forward<<<grid, block, sram_size>>>(d_Q, d_K, d_V, d_O, b_c, b_r, t_c, t_r, seq_len_k, seq_len_q, d_k, scaling_factor);
     CUDA_CHECK(cudaEventRecord(stop));
 
     CUDA_CHECK(cudaDeviceSynchronize());  // Wait for kernel to finish
