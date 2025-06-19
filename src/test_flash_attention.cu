@@ -11,14 +11,15 @@
 #include <cmath>
 
 // Helper function to check CUDA errors
-#define CUDA_CHECK(call) \
-    do { \
-        cudaError_t error = call; \
-        if (error != cudaSuccess) { \
-            std::cerr << "CUDA error at " << __FILE__ << ":" << __LINE__ << " - " << cudaGetErrorString(error) << std::endl; \
-            exit(1); \
-        } \
-    } while(0)
+#define CUDA_CHECK(ans) { gpuAssert((ans), __FILE__, __LINE__); }
+inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=true)
+{
+   if (code != cudaSuccess) 
+   {
+      fprintf(stderr,"GPUassert: %s %s %d\n", cudaGetErrorString(code), file, line);
+      if (abort) exit(code);
+   }
+}
 
 // Helper function to initialize random data
 template <typename T>
@@ -124,20 +125,21 @@ int main() {
 
     int sram_size_limit = prop.sharedMemPerBlock / sizeof(float); 
 
-    // Test parameters
-    const int batch_size = 8;
-    const int num_heads = 2;
-    const int seq_len_q = 1024; 
-    const int seq_len_k = 1024; 
-    const int d_k = 256;
-    const int d_v = 256;
+    // Test parameters - 4, 8, 128, 64
+    const int batch_size = 4;
+    const int num_heads = 8;
+    const int seq_len_q = 128; 
+    // const int seq_len_q = 1024; 
+    const int seq_len_k = seq_len_q; 
+    const int d_k = 64;
+    const int d_v = 64;
     const float scaling_factor = 1.0f/sqrtf(static_cast<float>(d_k)); 
-
-    int queries_per_thread = 1; 
     
     // Flash attention parameters
     const int b_r = min(seq_len_q, (sram_size_limit / ((d_k + d_v) * 2)));  // block rows (query block size)
-    const int b_c = min(seq_len_k, (sram_size_limit / ((d_k + d_v) * 2)));  // block columns (key/value block size)
+    const int b_c = min(min(d_k, seq_len_k), (sram_size_limit / ((d_k + d_v) * 2)));  // block columns (key/value block size)
+    // const int b_r = 12; 
+    // const int b_c = 12; 
     const int t_r = (seq_len_q + b_r - 1) / b_r;  // number of query tiles
     const int t_c = (seq_len_k + b_c - 1) / b_c;  // number of key tiles
 
@@ -176,7 +178,7 @@ int main() {
     init_random_data(h_V.data(), v_size, 0.1f);
     
     // Allocate device memory
-    float *d_Q, *d_K, *d_V, *d_O;
+    float *d_Q, *d_K, *d_V, *d_O; 
     flash_attn_forward_params *d_params;
     
     CUDA_CHECK(cudaMalloc(&d_Q, q_size * sizeof(float)));
@@ -194,9 +196,10 @@ int main() {
     std::cout << "Launching Flash Attention kernel..." << std::endl;
     
     dim3 grid(batch_size, num_heads);
-    int block_x = min(32, b_r); 
-    int block_y = 1024/block_x; 
-    dim3 block(block_y, block_x); // Ensure block size doesn't exceed max
+    int block_x = 8; 
+    int block_y = 32; 
+    int block_z = 4; 
+    dim3 block(block_x, block_y, block_z); // Ensure block size doesn't exceed max
 
     // std::cout << "Block dim: " << 1024 / b_r << ' ' << b_r << '\n'; 
 
