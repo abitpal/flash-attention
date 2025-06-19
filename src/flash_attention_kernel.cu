@@ -1,6 +1,5 @@
 // #include "utils.h"
 #include "flash_attention_kernel.h"
-#include "consts.h"
 #include <assert.h>
 #include <cstdio> 
 
@@ -14,7 +13,9 @@
 // }
 
 const int d_k = 64;  // template this
-const int sqrt_d_k = 16; 
+const int sqrt_d_k = 8; 
+const int const_b_r = 48; 
+const int full_mask = 0xffffffff; 
 // const int sram_size_limit = 49152 / sizeof(float); 
 // const int max_b_r = (sram_size_limit / (d_k * 4));  // block rows (query block size)
 // const int b_c = b_r; 
@@ -25,6 +26,14 @@ __device__ float operator*(const float4 &a, const float4 &b) {
     return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w; 
 }
 
+__device__ float4 operator+(const float4 &a, const float4 &b) {
+    return {a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w}; 
+}
+
+__device__ float4 operator*(const float4 &a, const float &b) {
+    return {a.x * b, a.y * b, a.z * b, a.w * b}; 
+}
+
 
 __global__ 
 void flash_attn_forward(
@@ -33,7 +42,7 @@ void flash_attn_forward(
     const int _d_k, const float scaling_factor) {
     int thread_x = threadIdx.x, thread_y = threadIdx.y, thread_z = threadIdx.z; 
     int tcount_x = blockDim.x, tcount_y = blockDim.y, tcount_z = blockDim.z; 
-    int tid = thread_y * tcount_x + tcount_x; 
+    int warp_id = (thread_y * tcount_x + tcount_x) % 32; 
     int batch_idx = blockIdx.x, head_idx = blockIdx.y;  // batch and head index
     int n_head = gridDim.y; 
 
@@ -69,8 +78,8 @@ void flash_attn_forward(
             }
             // __syncthreads();
             // store S in o_i / allocate 32 threads per element
-            for (int i = thread_z; i < true_br; i += tcount_z) {
-                for (int j = thread_y; j < true_bc; j += tcount_y) {
+            for (int i = thread_z * tcount_y + thread_y; i < true_br; i += tcount_y * tcount_z) {
+                for (int j = 0; j < true_bc; j += 1) {
                     float sum = 0; 
                     // vectorization here
                     for (int k = 4 * thread_x; k < d_k; k += 4 * tcount_x) {
@@ -79,14 +88,18 @@ void flash_attn_forward(
                         sum += q_val * k_val; 
                     }
                     for (int offset = 4; offset > 0; offset /= 2) {
-                        sum += __shfl_down_sync(0xffffffff, sum, offset);
+                        sum += __shfl_down_sync(full_mask, sum, offset);
                     }
-                    if (thread_x == 0) {
-                        o_i[i * d_k + j] = sum; 
+
+                    sum = __shfl_sync(full_mask, sum, (warp_id / 8) * 8); 
+
+                    for (int k = 4 * thread_x; k < d_k; k += 4 * tcount_x) {
+                        float4 v_val = *reinterpret_cast<float4*>(v_i + j * d_k + k) * sum; 
+                        *reinterpret_cast<float4*>(o_i + i * d_k + k) = *reinterpret_cast<float4*>(o_i + i * d_k + k) + v_val;
                     }
                 }
             }
-            
+
         }
     }
 }

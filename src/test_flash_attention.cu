@@ -7,7 +7,6 @@
 #include <cmath>
 #include <cassert>
 #include "flash_attention_kernel.h"
-#include "consts.h"
 #include <cmath>
 
 // Helper function to check CUDA errors
@@ -136,10 +135,11 @@ int main() {
     const float scaling_factor = 1.0f/sqrtf(static_cast<float>(d_k)); 
     
     // Flash attention parameters
-    const int b_r = min(seq_len_q, (sram_size_limit / ((d_k + d_v) * 2)));  // block rows (query block size)
-    const int b_c = min(min(d_k, seq_len_k), (sram_size_limit / ((d_k + d_v) * 2)));  // block columns (key/value block size)
-    // const int b_r = 12; 
-    // const int b_c = 12; 
+    // const int b_r = min(seq_len_q, (sram_size_limit / ((d_k + d_v) * 2)));  // block rows (query block size)
+    // const int b_c = min(min(d_k, seq_len_k), (sram_size_limit / ((d_k + d_v) * 2)));  // block columns (key/value block size)
+    const int offset = -16; 
+    const int b_r = 48 - offset; 
+    const int b_c = 48 + offset; 
     const int t_r = (seq_len_q + b_r - 1) / b_r;  // number of query tiles
     const int t_c = (seq_len_k + b_c - 1) / b_c;  // number of key tiles
 
@@ -197,8 +197,8 @@ int main() {
     
     dim3 grid(batch_size, num_heads);
     int block_x = 8; 
-    int block_y = 32; 
-    int block_z = 4; 
+    int block_y = b_r; 
+    int block_z = 1; 
     dim3 block(block_x, block_y, block_z); // Ensure block size doesn't exceed max
 
     // std::cout << "Block dim: " << 1024 / b_r << ' ' << b_r << '\n'; 
