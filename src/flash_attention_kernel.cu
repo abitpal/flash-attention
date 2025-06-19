@@ -76,25 +76,30 @@ void flash_attn_forward(
                     *reinterpret_cast<float4*>(v_i + i * d_k + j) = *reinterpret_cast<float4*>(V + (i + k_idx * b_c) * d_k + j); 
                 }
             }
-            // __syncthreads();
+            __syncthreads();
             // store S in o_i / allocate 32 threads per element
             for (int i = thread_z * tcount_y + thread_y; i < true_br; i += tcount_y * tcount_z) {
-                for (int j = 0; j < true_bc; j += 1) {
-                    float sum = 0; 
-                    // vectorization here
+                for (int j = 0; j < true_bc; j += 4) {
+                    float sum[4] = {0, 0, 0, 0}; 
+                    // vectorization + register tiling
                     for (int k = 4 * thread_x; k < d_k; k += 4 * tcount_x) {
                         float4 q_val = *reinterpret_cast<float4*>(q_i + i * d_k + k); 
-                        float4 k_val = *reinterpret_cast<float4*>(k_i + j * d_k + k); 
-                        sum += q_val * k_val; 
+                        for (int c = 0; c < 4; ++c) {
+                            float4 k_val = *reinterpret_cast<float4*>(k_i + (j + c) * d_k + k); 
+                            sum[c] += q_val * k_val; 
+                        }
                     }
-                    for (int offset = 4; offset > 0; offset /= 2) {
-                        sum += __shfl_down_sync(full_mask, sum, offset);
+                    for (int c = 0; c < 4; ++c) {
+                        for (int offset = 4; offset > 0; offset /= 2) {
+                            sum[c] += __shfl_down_sync(full_mask, sum[c], offset);
+                        }
+                        sum[c] = __shfl_sync(full_mask, sum[c], (warp_id / 8) * 8); 
                     }
-
-                    sum = __shfl_sync(full_mask, sum, (warp_id / 8) * 8); 
-
                     for (int k = 4 * thread_x; k < d_k; k += 4 * tcount_x) {
-                        float4 v_val = *reinterpret_cast<float4*>(v_i + j * d_k + k) * sum; 
+                        float4 v_val = {0, 0, 0, 0}; 
+                        for (int c = 0; c < 4; ++c) {
+                            float4 v_val = v_val + *reinterpret_cast<float4*>(v_i + (j + c) * d_k + k) * sum[c]; 
+                        }
                         *reinterpret_cast<float4*>(o_i + i * d_k + k) = *reinterpret_cast<float4*>(o_i + i * d_k + k) + v_val;
                     }
                 }
