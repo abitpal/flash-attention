@@ -37,7 +37,7 @@ __device__ float4 operator*(const float4 &a, const float &b) {
 
 __global__ 
 void flash_attn_forward(
-    float* Q, float* K, float* V, float* O, const int b_c, const int b_r, const int t_c, 
+    float* Q, float* K, float* V, float* O, float* L, float* M, const int b_c, const int b_r, const int t_c, 
     const int t_r, const int n_seq_k, const int n_seq_q,
     const int _d_k, const float scaling_factor) {
     int thread_x = threadIdx.x, thread_y = threadIdx.y, thread_z = threadIdx.z; 
@@ -55,6 +55,7 @@ void flash_attn_forward(
     Q += (batch_idx * n_head * n_seq_q * d_k) + head_idx * (n_seq_q * d_k);
     K += (batch_idx * n_head * n_seq_k * d_k) + head_idx * (n_seq_k * d_k);
     V += (batch_idx * n_head * n_seq_k * d_k) + head_idx * (n_seq_k * d_k);
+    O += (batch_idx * n_head * n_seq_q * d_k) + head_idx * (n_seq_q * d_k); 
 
     // https://siboehm.com/articles/22/CUDA-MMM Global Memory Coalescing
     for (int q_idx = 0; q_idx < t_r; q_idx++) {
@@ -65,6 +66,10 @@ void flash_attn_forward(
                 *reinterpret_cast<float4*>(q_i + off_set_i + j) = *reinterpret_cast<float4*>(Q + (i + q_idx * b_r) * d_k + j); 
                 *reinterpret_cast<float4*>(o_i + off_set_i + j) = {0, 0, 0, 0}; 
             }
+        }
+        for (int i = 4 * (thread_y * tcount_x + thread_x); i < true_br; i += 4 * tcount_x * tcount_y) {
+            // *reinterpret_cast<float4*>(L + b_r * q_idx + i) = {0, 0, 0, 0}; 
+            *reinterpret_cast<float4*>(M + i) = {-INFINITY, -INFINITY, -INFINITY, -INFINITY}; 
         }
         __syncthreads(); 
         for (int k_idx = 0; k_idx < t_c; k_idx++) {
@@ -79,33 +84,53 @@ void flash_attn_forward(
             __syncthreads();
             // store S in o_i / allocate 32 threads per element
             for (int i = thread_z * tcount_y + thread_y; i < true_br; i += tcount_y * tcount_z) {
+                float mx = M[i]; 
+                float sum = L[q_idx * b_r + i]; 
                 for (int j = 0; j < true_bc; j += 4) {
-                    float sum[4] = {0, 0, 0, 0}; 
+                    float dot_prod[4] = {0, 0, 0, 0}; 
                     // vectorization + register tiling
                     for (int k = 4 * thread_x; k < d_k; k += 4 * tcount_x) {
                         float4 q_val = *reinterpret_cast<float4*>(q_i + i * d_k + k); 
                         for (int c = 0; c < 4; ++c) {
                             float4 k_val = *reinterpret_cast<float4*>(k_i + (j + c) * d_k + k); 
-                            sum[c] += q_val * k_val; 
+                            dot_prod[c] += q_val * k_val; 
                         }
                     }
+                    float new_mx = mx; 
                     for (int c = 0; c < 4; ++c) {
                         for (int offset = 4; offset > 0; offset /= 2) {
-                            sum[c] += __shfl_down_sync(full_mask, sum[c], offset);
+                            dot_prod[c] += __shfl_down_sync(full_mask, dot_prod[c], offset);
                         }
-                        sum[c] = __shfl_sync(full_mask, sum[c], (warp_id / 8) * 8); 
+                        dot_prod[c] = __shfl_sync(full_mask, dot_prod[c], (warp_id / 8) * 8); 
+                        float pred_mx = new_mx; 
+                        new_mx = max(new_mx, dot_prod[c]); 
+                        sum = sum * exp(pred_mx - new_mx) + exp(dot_prod[c] - new_mx); 
                     }
                     for (int k = 4 * thread_x; k < d_k; k += 4 * tcount_x) {
                         float4 v_val = {0, 0, 0, 0}; 
                         for (int c = 0; c < 4; ++c) {
-                            float4 v_val = v_val + *reinterpret_cast<float4*>(v_i + (j + c) * d_k + k) * sum[c]; 
+                            float4 v_val = v_val + *reinterpret_cast<float4*>(v_i + (j + c) * d_k + k) * exp(dot_prod[c] - new_mx); 
                         }
-                        *reinterpret_cast<float4*>(o_i + i * d_k + k) = *reinterpret_cast<float4*>(o_i + i * d_k + k) + v_val;
+                        *reinterpret_cast<float4*>(o_i + i * d_k + k) = *reinterpret_cast<float4*>(o_i + i * d_k + k) * exp(mx - new_mx) + v_val;
                     }
+                    mx = new_mx; 
+                }
+                if (thread_x == 0) {
+                    M[i] = mx; 
+                    L[q_idx * b_r + i] = sum; 
                 }
             }
-
+            // write back O
+            for (int i = thread_z * tcount_y + thread_y; i < true_br; i += tcount_y * tcount_z) {
+                for (int j = 4 * thread_x; i < d_k; i += 4 * tcount_x) {
+                    *reinterpret_cast<float4*>(O + (q_idx * b_r + i) * d_k + j) = *reinterpret_cast<float4*>(o_i + i * d_k + j); 
+                }
+            }
+            
         }
+
+
+        __syncthreads(); 
     }
 }
 

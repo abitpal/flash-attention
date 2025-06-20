@@ -53,6 +53,6 @@ typedef struct {
  */
 __global__ 
 void flash_attn_forward(
-    float* Q, float* K, float* V, float* O, const int b_c, const int b_r, const int t_c, 
+    float* Q, float* K, float* V, float* O, float* L, float* M, const int b_c, const int b_r, const int t_c, 
     const int t_r, const int n_seq_k, const int n_seq_q,
     const int d_k, const float scaling_factor); 

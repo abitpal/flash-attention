@@ -170,6 +170,8 @@ int main() {
     std::vector<float> h_V(v_size);
     std::vector<float> h_O(o_size);
     std::vector<float> h_O_ref(o_size);
+    std::vector<float> h_L(b_r, 0.0f); 
+    std::vector<float> h_M(b_r, -INFINITY); 
     
     // Initialize input data
     std::cout << "Initializing input data..." << std::endl;
@@ -178,20 +180,23 @@ int main() {
     init_random_data(h_V.data(), v_size, 0.1f);
     
     // Allocate device memory
-    float *d_Q, *d_K, *d_V, *d_O; 
+    float *d_Q, *d_K, *d_V, *d_O, *d_L, *d_M; 
     flash_attn_forward_params *d_params;
     
     CUDA_CHECK(cudaMalloc(&d_Q, q_size * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&d_K, k_size * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&d_V, v_size * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&d_O, o_size * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_params, sizeof(flash_attn_forward_params)));
+    CUDA_CHECK(cudaMalloc(&d_L, b_r * sizeof(float))); 
+    CUDA_CHECK(cudaMalloc(&d_M, b_r * sizeof(float))); 
     
     // Copy data to device
     CUDA_CHECK(cudaMemcpy(d_Q, h_Q.data(), q_size * sizeof(float), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_K, h_K.data(), k_size * sizeof(float), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_V, h_V.data(), v_size * sizeof(float), cudaMemcpyHostToDevice));
-            
+    CUDA_CHECK(cudaMemcpy(d_L, h_L.data(), b_r * sizeof(float), cudaMemcpyHostToDevice)); 
+    CUDA_CHECK(cudaMemcpy(d_M, h_M.data(), b_r * sizeof(float), cudaMemcpyHostToDevice)); 
+    
     // Launch kernel
     std::cout << "Launching Flash Attention kernel..." << std::endl;
     
@@ -220,7 +225,7 @@ int main() {
     cudaProfilerStart();  // Begin nsys profiling window
 
     CUDA_CHECK(cudaEventRecord(start));
-    flash_attn_forward<<<grid, block, sram_size>>>(d_Q, d_K, d_V, d_O, b_c, b_r, t_c, t_r, seq_len_k, seq_len_q, d_k, scaling_factor);
+    flash_attn_forward<<<grid, block, sram_size>>>(d_Q, d_K, d_V, d_O, d_L, d_M, b_c, b_r, t_c, t_r, seq_len_k, seq_len_q, d_k, scaling_factor);
     CUDA_CHECK(cudaEventRecord(stop));
 
     CUDA_CHECK(cudaDeviceSynchronize());  // Wait for kernel to finish
@@ -270,7 +275,6 @@ int main() {
     CUDA_CHECK(cudaFree(d_K));
     CUDA_CHECK(cudaFree(d_V));
     CUDA_CHECK(cudaFree(d_O));
-    CUDA_CHECK(cudaFree(d_params));
     CUDA_CHECK(cudaEventDestroy(start));
     CUDA_CHECK(cudaEventDestroy(stop));
     
