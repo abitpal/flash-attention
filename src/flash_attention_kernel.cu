@@ -42,7 +42,7 @@ void flash_attn_forward(
     const int _d_k, const float scaling_factor) {
     int thread_x = threadIdx.x, thread_y = threadIdx.y, thread_z = threadIdx.z; 
     int tcount_x = blockDim.x, tcount_y = blockDim.y, tcount_z = blockDim.z; 
-    int warp_id = (thread_y * tcount_x + tcount_x) % 32; 
+    int warp_id = (thread_y * tcount_x + thread_x) % 32; 
     int batch_idx = blockIdx.x, head_idx = blockIdx.y;  // batch and head index
     int n_head = gridDim.y; 
 
@@ -56,6 +56,8 @@ void flash_attn_forward(
     K += (batch_idx * n_head * n_seq_k * d_k) + head_idx * (n_seq_k * d_k);
     V += (batch_idx * n_head * n_seq_k * d_k) + head_idx * (n_seq_k * d_k);
     O += (batch_idx * n_head * n_seq_q * d_k) + head_idx * (n_seq_q * d_k); 
+    L += (batch_idx * n_head * n_seq_q) + head_idx * n_seq_q; 
+    M += (batch_idx * n_head * n_seq_q) + head_idx * n_seq_q; 
 
     // https://siboehm.com/articles/22/CUDA-MMM Global Memory Coalescing
     for (int q_idx = 0; q_idx < t_r; q_idx++) {
@@ -74,6 +76,7 @@ void flash_attn_forward(
         __syncthreads(); 
         for (int k_idx = 0; k_idx < t_c; k_idx++) {
             int true_bc = min(n_seq_k, (k_idx + 1) * b_c) - b_c * k_idx; 
+            assert(true_bc % 4 == 0); 
             for (int i = thread_z * tcount_y + thread_y; i < true_bc; i += tcount_y * tcount_z) {
                 for (int j = 4 * thread_x; j < d_k; j += 4 * tcount_x) {
                     // float k_val = K[(i + k_idx * b_c) * d_k + j]; 
@@ -84,7 +87,7 @@ void flash_attn_forward(
             __syncthreads();
             // store S in o_i / allocate 32 threads per element
             for (int i = thread_z * tcount_y + thread_y; i < true_br; i += tcount_y * tcount_z) {
-                float mx = M[i]; 
+                float mx = M[q_idx * b_r + i]; 
                 float sum = L[q_idx * b_r + i]; 
                 for (int j = 0; j < true_bc; j += 4) {
                     float dot_prod[4] = {0, 0, 0, 0}; 
@@ -102,34 +105,29 @@ void flash_attn_forward(
                             dot_prod[c] += __shfl_down_sync(full_mask, dot_prod[c], offset);
                         }
                         dot_prod[c] = __shfl_sync(full_mask, dot_prod[c], (warp_id / 8) * 8); 
-                        float pred_mx = new_mx; 
+                        float prev_mx = new_mx; 
                         new_mx = max(new_mx, dot_prod[c]); 
-                        sum = sum * exp(pred_mx - new_mx) + exp(dot_prod[c] - new_mx); 
+                        sum = sum * exp(prev_mx - new_mx) + exp(dot_prod[c] - new_mx); 
                     }
+
                     for (int k = 4 * thread_x; k < d_k; k += 4 * tcount_x) {
                         float4 v_val = {0, 0, 0, 0}; 
                         for (int c = 0; c < 4; ++c) {
-                            float4 v_val = v_val + *reinterpret_cast<float4*>(v_i + (j + c) * d_k + k) * exp(dot_prod[c] - new_mx); 
+                            v_val = v_val + *reinterpret_cast<float4*>(v_i + (j + c) * d_k + k) * exp(dot_prod[c] - new_mx); 
                         }
                         *reinterpret_cast<float4*>(o_i + i * d_k + k) = *reinterpret_cast<float4*>(o_i + i * d_k + k) * exp(mx - new_mx) + v_val;
                     }
                     mx = new_mx; 
                 }
                 if (thread_x == 0) {
-                    M[i] = mx; 
+                    M[q_idx * b_r + i] = mx; 
                     L[q_idx * b_r + i] = sum; 
                 }
-            }
-            // write back O
-            for (int i = thread_z * tcount_y + thread_y; i < true_br; i += tcount_y * tcount_z) {
-                for (int j = 4 * thread_x; i < d_k; i += 4 * tcount_x) {
-                    *reinterpret_cast<float4*>(O + (q_idx * b_r + i) * d_k + j) = *reinterpret_cast<float4*>(o_i + i * d_k + j); 
+                for (int j = 4 * thread_x; j < d_k; j += 4 * tcount_x) {
+                    *reinterpret_cast<float4*>(O + (q_idx * b_r + i) * d_k + j) = *reinterpret_cast<float4*>(o_i + i * d_k + j)  * (1.0f/sum); 
                 }
             }
-            
         }
-
-
         __syncthreads(); 
     }
 }

@@ -51,7 +51,7 @@ void reference_attention(const T* Q, const T* K, const T* V, T* O_ref,
                         int k_idx = b * num_heads * seq_len_k * d_k + h * seq_len_k * d_k + j * d_k + k;
                         dot_product += Q[q_idx] * K[k_idx];
                     }
-                    scores[i * seq_len_k + j] = dot_product / sqrt(static_cast<T>(d_k));
+                    scores[i * seq_len_k + j] = dot_product / 1;
                 }
             }
             
@@ -163,6 +163,7 @@ int main() {
     const int k_size = batch_size * num_heads * d_k * seq_len_k;
     const int v_size = batch_size * num_heads * d_v * seq_len_k;
     const int o_size = batch_size * num_heads * d_v * seq_len_q;
+    const int stat_size = batch_size * num_heads * seq_len_q; 
     
     // Allocate host memory
     std::vector<float> h_Q(q_size);
@@ -170,8 +171,8 @@ int main() {
     std::vector<float> h_V(v_size);
     std::vector<float> h_O(o_size);
     std::vector<float> h_O_ref(o_size);
-    std::vector<float> h_L(b_r, 0.0f); 
-    std::vector<float> h_M(b_r, -INFINITY); 
+    std::vector<float> h_L(stat_size, 0.0f); 
+    std::vector<float> h_M(stat_size, -INFINITY); 
     
     // Initialize input data
     std::cout << "Initializing input data..." << std::endl;
@@ -187,15 +188,15 @@ int main() {
     CUDA_CHECK(cudaMalloc(&d_K, k_size * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&d_V, v_size * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&d_O, o_size * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_L, b_r * sizeof(float))); 
-    CUDA_CHECK(cudaMalloc(&d_M, b_r * sizeof(float))); 
+    CUDA_CHECK(cudaMalloc(&d_L, stat_size * sizeof(float))); 
+    CUDA_CHECK(cudaMalloc(&d_M, stat_size * sizeof(float))); 
     
     // Copy data to device
     CUDA_CHECK(cudaMemcpy(d_Q, h_Q.data(), q_size * sizeof(float), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_K, h_K.data(), k_size * sizeof(float), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_V, h_V.data(), v_size * sizeof(float), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_L, h_L.data(), b_r * sizeof(float), cudaMemcpyHostToDevice)); 
-    CUDA_CHECK(cudaMemcpy(d_M, h_M.data(), b_r * sizeof(float), cudaMemcpyHostToDevice)); 
+    CUDA_CHECK(cudaMemcpy(d_L, h_L.data(), stat_size * sizeof(float), cudaMemcpyHostToDevice)); 
+    CUDA_CHECK(cudaMemcpy(d_M, h_M.data(), stat_size * sizeof(float), cudaMemcpyHostToDevice)); 
     
     // Launch kernel
     std::cout << "Launching Flash Attention kernel..." << std::endl;
@@ -241,27 +242,31 @@ int main() {
     CUDA_CHECK(cudaMemcpy(h_O.data(), d_O, o_size * sizeof(float), cudaMemcpyDeviceToHost));
     
     // Compute reference result
-    // std::cout << "Computing reference result..." << std::endl;
-    // reference_attention(h_Q.data(), h_K.data(), h_V.data(), h_O_ref.data(),
-    //                    batch_size, num_heads, seq_len_q, seq_len_k, d_k, d_v);
+    std::cout << "Computing reference result..." << std::endl;
+    reference_attention(h_Q.data(), h_K.data(), h_V.data(), h_O_ref.data(),
+                       batch_size, num_heads, seq_len_q, seq_len_k, d_k, d_v);
     
-    // // Compare results
-    // std::cout << "Comparing results..." << std::endl;
-    // bool passed = compare_results(h_O.data(), h_O_ref.data(), o_size, 1e-2f);
+    // Compare results
+    std::cout << "Comparing results..." << std::endl;
+    bool passed = compare_results(h_O.data(), h_O_ref.data(), o_size, 1e-2f);
     
-    // if (passed) {
-    //     std::cout << "Test PASSED!" << std::endl;
-    // } else {
-    //     std::cout << "Test FAILED!" << std::endl;
-    // }
+    if (passed) {
+        std::cout << "Test PASSED!" << std::endl;
+    } else {
+        std::cout << "Test FAILED!" << std::endl;
+    }
     
-    // // Print some sample values for inspection
-    // std::cout << "\nSample values comparison:" << std::endl;
-    // for (int i = 0; i < std::min(10, o_size); i++) {
-    //     std::cout << "Index " << i << ": GPU=" << h_O[i] << ", CPU=" << h_O_ref[i] << std::endl;
-    // }
+    // Print some sample values for inspection
+    std::cout << "\nSample values comparison:" << std::endl;
+    for (int i = 0; i < std::min(10, o_size); i++) {
+        std::cout << "Index " << i << ": GPU=" << h_O[i] << ", CPU=" << h_O_ref[i] << std::endl;
+    }
 
-    // print O
+    for (int i = 0; i < min(10, seq_len_q); i++) {
+        for (int j = 0; j < min(5, d_k); j++) {
+            printf("%.5f=%.5f ", h_O[i * d_k + j], h_O_ref[i * d_k + j]); 
+        }
+    }
 
     // for (int i = 0; i < d_k; i++) {
     //     for (int j = 0; j < seq_len_q; j++) {
