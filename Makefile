@@ -3,7 +3,7 @@
 NVCC = nvcc
 PROFILER = nvprof
 PROFILER_FLAGS = 
-CFLAGS = -arch=sm_70 -O3 -lineinfo
+CFLAGS = -arch=sm_70 -O3 -lineinfo --use_fast_math
 LIBS = -lcublas
 
 # Directories
