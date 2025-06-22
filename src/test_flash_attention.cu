@@ -109,7 +109,7 @@ void flash_attn_forward(
                         }
                         dot_prod[c] = __shfl_sync(full_mask, dot_prod[c], ty_lead); 
                         float prev_mx = new_mx; 
-                        new_mx = max(new_mx, dot_prod[c]); 
+                        new_mx = fmaxf(new_mx, dot_prod[c]); 
                         sum = sum * __expf(prev_mx - new_mx) + __expf(dot_prod[c] - new_mx); 
                     }
                     
@@ -130,10 +130,11 @@ void flash_attn_forward(
                 }
             }
         }
+        const float inv_sum = __frcp_rn(sum); 
         for (int i = thread_z * tcount_y + thread_y; i < true_br; i += tcount_y * tcount_z) {
             // float sum = L[q_idx_br + i]; 
             for (int j = 4 * thread_x; j < d_k; j += 4 * tcount_x) {
-                *reinterpret_cast<float4*>(O + (q_idx_br + i) * d_k + j) = *reinterpret_cast<float4*>(o_i + i * d_k + j) * (1/sum); 
+                *reinterpret_cast<float4*>(O + (q_idx_br + i) * d_k + j) = *reinterpret_cast<float4*>(o_i + i * d_k + j) * inv_sum; 
             }
         }
         if (thread_x == 0) {
