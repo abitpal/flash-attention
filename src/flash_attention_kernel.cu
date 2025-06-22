@@ -2,20 +2,13 @@
 #include "flash_attention_kernel.h"
 #include <assert.h>
 #include <cstdio> 
+#include <torch/types.h>
 
-// constexpr int get_sram_size() {
-//     int device = 0; 
-//     cudaDeviceProp prop = NULL; 
-
-//     cudaGetDevice(&device);
-//     cudaGetDeviceProperties(&prop, device);
-//     return prop.sharedMemPerBlock; 
-// }
-
-const int d_k = 64;  // template this
-const int sqrt_d_k = 8; 
-const int const_b_r = 48; 
-const int full_mask = 0xffffffff; 
+// const int d_k = 64;  // template this
+// const int sqrt_d_k = 8; 
+// const int const_b_r = 48; 
+const unsigned full_mask = 0xffffffff; 
+const int col_per_thread = 16; 
 // const int sram_size_limit = 49152 / sizeof(float); 
 // const int max_b_r = (sram_size_limit / (d_k * 4));  // block rows (query block size)
 // const int b_c = b_r; 
@@ -34,12 +27,24 @@ __device__ float4 operator*(const float4 &a, const float &b) {
     return {a.x * b, a.y * b, a.z * b, a.w * b}; 
 }
 
+#define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
+inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=true)
+{
+   if (code != cudaSuccess) 
+   {
+      fprintf(stderr,"GPUassert: %s %s %d\n", cudaGetErrorString(code), file, line);
+      if (abort) exit(code);
+   }
+}
 
 __global__ 
 void flash_attn_forward(
-    float* Q, float* K, float* V, float* O, float* L, float* M, const int b_c, const int b_r, const int t_c, 
+    float* __restrict__ Q, float* __restrict__ K, float* 
+    __restrict__ V, float* __restrict__ O, 
+    float* __restrict__ L, float* __restrict__ M, 
+    const int b_c, const int b_r, const int t_c, 
     const int t_r, const int n_seq_k, const int n_seq_q,
-    const int _d_k, const float scaling_factor) {
+    const int d_k, const float scaling_factor) {
     int thread_x = threadIdx.x, thread_y = threadIdx.y, thread_z = threadIdx.z; 
     int tcount_x = blockDim.x, tcount_y = blockDim.y, tcount_z = blockDim.z; 
     int warp_id = (thread_y * tcount_x + thread_x) % 32; 
@@ -65,13 +70,13 @@ void flash_attn_forward(
         for (int i = thread_z * tcount_y + thread_y; i < true_br; i += tcount_y * tcount_z) {
             const int off_set_i = i * d_k; 
             for (int j = 4 * thread_x; j < d_k; j += 4 * tcount_x) {
-                *reinterpret_cast<float4*>(q_i + off_set_i + j) = *reinterpret_cast<float4*>(Q + (i + q_idx * b_r) * d_k + j); 
+                *reinterpret_cast<float4*>(q_i + off_set_i + j) = __ldg(reinterpret_cast<float4*>(Q + (i + q_idx * b_r) * d_k + j)); 
                 *reinterpret_cast<float4*>(o_i + off_set_i + j) = {0, 0, 0, 0}; 
             }
         }
         for (int i = 4 * (thread_y * tcount_x + thread_x); i < true_br; i += 4 * tcount_x * tcount_y) {
-            // *reinterpret_cast<float4*>(L + b_r * q_idx + i) = {0, 0, 0, 0}; 
-            *reinterpret_cast<float4*>(M + i) = {-INFINITY, -INFINITY, -INFINITY, -INFINITY}; 
+            *reinterpret_cast<float4*>(L + b_r * q_idx + i) = {0, 0, 0, 0}; 
+            *reinterpret_cast<float4*>(M + b_r * q_idx + i) = {-INFINITY, -INFINITY, -INFINITY, -INFINITY}; 
         }
         __syncthreads(); 
         for (int k_idx = 0; k_idx < t_c; k_idx++) {
@@ -80,8 +85,8 @@ void flash_attn_forward(
             for (int i = thread_z * tcount_y + thread_y; i < true_bc; i += tcount_y * tcount_z) {
                 for (int j = 4 * thread_x; j < d_k; j += 4 * tcount_x) {
                     // float k_val = K[(i + k_idx * b_c) * d_k + j]; 
-                    *reinterpret_cast<float4*>(k_i + i * d_k + j) = *reinterpret_cast<float4*>(K + (i + k_idx * b_c) * d_k + j); 
-                    *reinterpret_cast<float4*>(v_i + i * d_k + j) = *reinterpret_cast<float4*>(V + (i + k_idx * b_c) * d_k + j); 
+                    *reinterpret_cast<float4*>(k_i + i * d_k + j) = __ldg(reinterpret_cast<float4*>(K + (i + k_idx * b_c) * d_k + j)); 
+                    *reinterpret_cast<float4*>(v_i + i * d_k + j) = __ldg(reinterpret_cast<float4*>(V + (i + k_idx * b_c) * d_k + j)); 
                 }
             }
             __syncthreads();
@@ -89,18 +94,24 @@ void flash_attn_forward(
             for (int i = thread_z * tcount_y + thread_y; i < true_br; i += tcount_y * tcount_z) {
                 float mx = M[q_idx * b_r + i]; 
                 float sum = L[q_idx * b_r + i]; 
-                for (int j = 0; j < true_bc; j += 4) {
-                    float dot_prod[4] = {0, 0, 0, 0}; 
+                float4 o_i_im[2];  
+                for (int j = 0, k =  4 * thread_x; k < d_k; k += 4 * tcount_x, ++j) {
+                    o_i_im[j] = *reinterpret_cast<float4*>(o_i + i * d_k + k); 
+                }
+                // printf("%f\n", o_i_im.x); 
+                for (int j = 0; j < true_bc; j += col_per_thread) {
+                    float dot_prod[col_per_thread]; 
+                    for (int c = 0; c < col_per_thread; ++c) dot_prod[c] = 0 ;
                     // vectorization + register tiling
                     for (int k = 4 * thread_x; k < d_k; k += 4 * tcount_x) {
                         float4 q_val = *reinterpret_cast<float4*>(q_i + i * d_k + k); 
-                        for (int c = 0; c < 4; ++c) {
+                        for (int c = 0; c < col_per_thread; ++c) {
                             float4 k_val = *reinterpret_cast<float4*>(k_i + (j + c) * d_k + k); 
                             dot_prod[c] += q_val * k_val; 
                         }
                     }
                     float new_mx = mx; 
-                    for (int c = 0; c < 4; ++c) {
+                    for (int c = 0; c < col_per_thread; ++c) {
                         for (int offset = 4; offset > 0; offset /= 2) {
                             dot_prod[c] += __shfl_down_sync(full_mask, dot_prod[c], offset);
                         }
@@ -110,12 +121,16 @@ void flash_attn_forward(
                         sum = sum * exp(prev_mx - new_mx) + exp(dot_prod[c] - new_mx); 
                     }
 
-                    for (int k = 4 * thread_x; k < d_k; k += 4 * tcount_x) {
+                    float o_i_exp = exp(mx - new_mx); 
+
+                    for (int l = 0, k = 4 * thread_x; k < d_k; k += 4 * tcount_x, ++l) {
                         float4 v_val = {0, 0, 0, 0}; 
-                        for (int c = 0; c < 4; ++c) {
+                        for (int c = 0; c < col_per_thread; ++c) {
                             v_val = v_val + *reinterpret_cast<float4*>(v_i + (j + c) * d_k + k) * exp(dot_prod[c] - new_mx); 
                         }
-                        *reinterpret_cast<float4*>(o_i + i * d_k + k) = *reinterpret_cast<float4*>(o_i + i * d_k + k) * exp(mx - new_mx) + v_val;
+                        // printf("%f\n", o_i_im[l].x); 
+                        o_i_im[l] = o_i_im[l] * o_i_exp + v_val; 
+                        // *reinterpret_cast<float4*>(o_i + i * d_k + k) = *reinterpret_cast<float4*>(o_i + i * d_k + k) * o_i_exp + v_val;
                     }
                     mx = new_mx; 
                 }
@@ -123,12 +138,64 @@ void flash_attn_forward(
                     M[q_idx * b_r + i] = mx; 
                     L[q_idx * b_r + i] = sum; 
                 }
-                for (int j = 4 * thread_x; j < d_k; j += 4 * tcount_x) {
-                    *reinterpret_cast<float4*>(O + (q_idx * b_r + i) * d_k + j) = *reinterpret_cast<float4*>(o_i + i * d_k + j)  * (1.0f/sum); 
+                for (int l = 0, k = 4 * thread_x; k < d_k; k += 4 * tcount_x, ++l) {
+                    *reinterpret_cast<float4*>(o_i + i * d_k + k) = o_i_im[l] * (1.0/sum);
                 }
+            }
+        }
+        for (int i = thread_z * tcount_y + thread_y; i < true_br; i += tcount_y * tcount_z) {
+            // float sum = L[q_idx * b_r + i]; 
+            for (int j = 4 * thread_x; j < d_k; j += 4 * tcount_x) {
+                *reinterpret_cast<float4*>(O + (q_idx * b_r + i) * d_k + j) = *reinterpret_cast<float4*>(o_i + i * d_k + j); 
             }
         }
         __syncthreads(); 
     }
 }
 
+torch::Tensor forward(torch::Tensor& Q, torch::Tensor& K, torch::Tensor& V) {
+    const int num_batch = Q.size(0); 
+    const int num_heads = Q.size(1); 
+    const int seq_len_q = Q.size(2); 
+    // const int seq_len_q = 1024; 
+    const int seq_len_k = K.size(2); 
+    const int d_k = K.size(3); 
+    const int d_v = d_k; 
+    const float scaling_factor = 1.0f/sqrtf(static_cast<float>(d_k)); 
+    
+    // Flash attention parameters
+    // const int b_r = min(seq_len_q, (sram_size_limit / ((d_k + d_v) * 2)));  // block rows (query block size)
+    // const int b_c = min(min(d_k, seq_len_k), (sram_size_limit / ((d_k + d_v) * 2)));  // block columns (key/value block size)
+    const int offset = -16; 
+    const int b_r = 48 - offset; 
+    const int b_c = 48 + offset; 
+    const int t_r = (seq_len_q + b_r - 1) / b_r;  // number of query tiles
+    const int t_c = (seq_len_k + b_c - 1) / b_c;  // number of key tiles
+
+    int sram_size = (b_r * d_k + b_c * d_k + b_c * d_v + b_r * d_v) * sizeof(float); // = (b_r + b_c) * (d_k + d_v)
+
+    torch::Device device(torch::kCUDA);
+    auto options = torch::TensorOptions().dtype(Q.dtype()).device(Q.device());
+    auto O = torch::empty(Q.sizes(), options);
+    float *l, *m ;
+
+    gpuErrchk(cudaMalloc(&l, sizeof(float) * num_batch * num_heads * seq_len_q)); 
+    gpuErrchk(cudaMalloc(&m, sizeof(float) * num_batch * num_heads * seq_len_q)); 
+
+    // l = l.to(device); m = m.to(device); 
+
+    dim3 grid(num_batch, num_heads);
+    int block_x = 8; 
+    int block_y = b_r; 
+    int block_z = 1; 
+    dim3 block(block_x, block_y, block_z); // Ensure block size doesn't exceed max
+
+    flash_attn_forward<<<grid, block, sram_size>>>(
+        Q.data_ptr<float>(), K.data_ptr<float>(), V.data_ptr<float>(), 
+        O.data_ptr<float>(), l, m, 
+        b_c, b_r, t_c, t_r, seq_len_k, seq_len_q, d_k, scaling_factor
+    ); 
+
+
+    return O; 
+}

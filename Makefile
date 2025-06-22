@@ -11,7 +11,7 @@ SRC_DIR = src
 BUILD_DIR = build
 
 # Source files (in src/)
-SRCS = $(wildcard $(SRC_DIR)/*.cu)
+SRCS = $(SRC_DIR)/test_flash_attention.cu
 
 # Object files (in build/)
 OBJS = $(patsubst $(SRC_DIR)/%.cu,$(BUILD_DIR)/%.o,$(SRCS))
@@ -21,6 +21,7 @@ TARGET = $(BUILD_DIR)/test_flash_attention
 
 # Default rule
 all: $(TARGET)
+	./$(TARGET)
 
 # Linking final binary
 $(TARGET): $(OBJS)
