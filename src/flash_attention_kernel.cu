@@ -4,29 +4,6 @@
 #include <cstdio> 
 #include <torch/types.h>
 
-// const int d_k = 64;  // template this
-// const int sqrt_d_k = 8; 
-// const int const_b_r = 48; 
-const unsigned full_mask = 0xffffffff; 
-const int col_per_thread = 16; 
-// const int sram_size_limit = 49152 / sizeof(float); 
-// const int max_b_r = (sram_size_limit / (d_k * 4));  // block rows (query block size)
-// const int b_c = b_r; 
-// const int block_x = min(32, b_r); 
-// const int block_y = 1024 / block_x; 
-
-__device__ float operator*(const float4 &a, const float4 &b) {
-    return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w; 
-}
-
-__device__ float4 operator+(const float4 &a, const float4 &b) {
-    return {a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w}; 
-}
-
-__device__ float4 operator*(const float4 &a, const float &b) {
-    return {a.x * b, a.y * b, a.z * b, a.w * b}; 
-}
-
 #define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
 inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=true)
 {
@@ -35,6 +12,26 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
       fprintf(stderr,"GPUassert: %s %s %d\n", cudaGetErrorString(code), file, line);
       if (abort) exit(code);
    }
+}
+
+const unsigned full_mask = 0xffffffff; 
+const int col_per_thread = 16; 
+// const int sram_size_limit = 49152 / sizeof(float); 
+// const int max_b_r = (sram_size_limit / (d_k * 4));  // block rows (query block size)
+// const int b_c = b_r; 
+// const int block_x = min(32, b_r); 
+// const int block_y = 1024 / block_x; 
+
+__forceinline__ __device__ float operator*(const float4 &a, const float4 &b) {
+    return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w; 
+}
+
+__forceinline__ __device__ float4 operator+(const float4 &a, const float4 &b) {
+    return {a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w}; 
+}
+
+__forceinline__ __device__ float4 operator*(const float4 &a, const float &b) {
+    return {a.x * b, a.y * b, a.z * b, a.w * b}; 
 }
 
 __global__ 
@@ -47,7 +44,7 @@ void flash_attn_forward(
     const int d_k, const float scaling_factor) {
     int thread_x = threadIdx.x, thread_y = threadIdx.y, thread_z = threadIdx.z; 
     int tcount_x = blockDim.x, tcount_y = blockDim.y, tcount_z = blockDim.z; 
-    int warp_id = (thread_y * tcount_x + thread_x) % 32; 
+    int ty_lead = (((thread_y * tcount_x + thread_x) % 32) / 8) * 8; 
     int batch_idx = blockIdx.x, head_idx = blockIdx.y;  // batch and head index
     int n_head = gridDim.y; 
 
@@ -66,17 +63,19 @@ void flash_attn_forward(
 
     // https://siboehm.com/articles/22/CUDA-MMM Global Memory Coalescing
     for (int q_idx = 0; q_idx < t_r; q_idx++) {
-        int true_br = min(n_seq_q, (q_idx + 1) * b_r) - b_r * q_idx; 
+        int q_idx_br = q_idx * b_r; 
+        int true_br = min(n_seq_q, (q_idx + 1) * b_r) - q_idx_br; 
         for (int i = thread_z * tcount_y + thread_y; i < true_br; i += tcount_y * tcount_z) {
-            const int off_set_i = i * d_k; 
+            const int offset_i = i * d_k; 
             for (int j = 4 * thread_x; j < d_k; j += 4 * tcount_x) {
-                *reinterpret_cast<float4*>(q_i + off_set_i + j) = __ldg(reinterpret_cast<float4*>(Q + (i + q_idx * b_r) * d_k + j)); 
-                *reinterpret_cast<float4*>(o_i + off_set_i + j) = {0, 0, 0, 0}; 
+                const int offset_2 = offset_i + j; 
+                *reinterpret_cast<float4*>(q_i + offset_2) = __ldg(reinterpret_cast<float4*>(Q + (i + q_idx * b_r) * d_k + j)); 
+                *reinterpret_cast<float4*>(o_i + offset_2) = {0, 0, 0, 0}; 
             }
         }
         for (int i = 4 * (thread_y * tcount_x + thread_x); i < true_br; i += 4 * tcount_x * tcount_y) {
-            *reinterpret_cast<float4*>(L + b_r * q_idx + i) = {0, 0, 0, 0}; 
-            *reinterpret_cast<float4*>(M + b_r * q_idx + i) = {-INFINITY, -INFINITY, -INFINITY, -INFINITY}; 
+            *reinterpret_cast<float4*>(L + q_idx_br + i) = {0, 0, 0, 0}; 
+            *reinterpret_cast<float4*>(M + q_idx_br + i) = {-INFINITY, -INFINITY, -INFINITY, -INFINITY}; 
         }
         __syncthreads(); 
         for (int k_idx = 0; k_idx < t_c; k_idx++) {
@@ -90,14 +89,13 @@ void flash_attn_forward(
                 }
             }
             __syncthreads();
-            // store S in o_i / allocate 32 threads per element
+            // // store S in o_i / allocate 32 threads per element
+            // float mx = M[q_idx * b_r + thread_z * tcount_y + thread_y]; 
+            // float sum = L[q_idx * b_r + thread_z * tcount_y + thread_y]; 
+
             for (int i = thread_z * tcount_y + thread_y; i < true_br; i += tcount_y * tcount_z) {
-                float mx = M[q_idx * b_r + i]; 
-                float sum = L[q_idx * b_r + i]; 
-                float4 o_i_im[2];  
-                for (int j = 0, k =  4 * thread_x; k < d_k; k += 4 * tcount_x, ++j) {
-                    o_i_im[j] = *reinterpret_cast<float4*>(o_i + i * d_k + k); 
-                }
+                float mx = M[q_idx_br + i]; 
+                float sum = L[q_idx_br + i]; 
                 // printf("%f\n", o_i_im.x); 
                 for (int j = 0; j < true_bc; j += col_per_thread) {
                     float dot_prod[col_per_thread]; 
@@ -115,43 +113,43 @@ void flash_attn_forward(
                         for (int offset = 4; offset > 0; offset /= 2) {
                             dot_prod[c] += __shfl_down_sync(full_mask, dot_prod[c], offset);
                         }
-                        dot_prod[c] = __shfl_sync(full_mask, dot_prod[c], (warp_id / 8) * 8); 
+                        dot_prod[c] = __shfl_sync(full_mask, dot_prod[c], ty_lead); 
                         float prev_mx = new_mx; 
                         new_mx = max(new_mx, dot_prod[c]); 
-                        sum = sum * exp(prev_mx - new_mx) + exp(dot_prod[c] - new_mx); 
+                        sum = sum * __expf(prev_mx - new_mx) + __expf(dot_prod[c] - new_mx); 
+                    }
+                    
+                    for (int c = 0; c < col_per_thread; ++c) {
+                        dot_prod[c] = __expf(dot_prod[c] - new_mx); 
                     }
 
-                    float o_i_exp = exp(mx - new_mx); 
+                    float o_i_exp = __expf(mx - new_mx); 
 
                     for (int l = 0, k = 4 * thread_x; k < d_k; k += 4 * tcount_x, ++l) {
                         float4 v_val = {0, 0, 0, 0}; 
                         for (int c = 0; c < col_per_thread; ++c) {
-                            v_val = v_val + *reinterpret_cast<float4*>(v_i + (j + c) * d_k + k) * exp(dot_prod[c] - new_mx); 
+                            v_val = v_val + *reinterpret_cast<float4*>(v_i + (j + c) * d_k + k) * dot_prod[c]; 
                         }
-                        // printf("%f\n", o_i_im[l].x); 
-                        o_i_im[l] = o_i_im[l] * o_i_exp + v_val; 
-                        // *reinterpret_cast<float4*>(o_i + i * d_k + k) = *reinterpret_cast<float4*>(o_i + i * d_k + k) * o_i_exp + v_val;
+                        *reinterpret_cast<float4*>(o_i + i * d_k + k) = *reinterpret_cast<float4*>(o_i + i * d_k + k) * o_i_exp + v_val;
                     }
                     mx = new_mx; 
                 }
                 if (thread_x == 0) {
-                    M[q_idx * b_r + i] = mx; 
-                    L[q_idx * b_r + i] = sum; 
-                }
-                for (int l = 0, k = 4 * thread_x; k < d_k; k += 4 * tcount_x, ++l) {
-                    *reinterpret_cast<float4*>(o_i + i * d_k + k) = o_i_im[l] * (1.0/sum);
+                    M[q_idx_br + i] = mx; 
+                    L[q_idx_br + i] = sum; 
                 }
             }
         }
         for (int i = thread_z * tcount_y + thread_y; i < true_br; i += tcount_y * tcount_z) {
-            // float sum = L[q_idx * b_r + i]; 
+            float sum = L[q_idx_br + i]; 
             for (int j = 4 * thread_x; j < d_k; j += 4 * tcount_x) {
-                *reinterpret_cast<float4*>(O + (q_idx * b_r + i) * d_k + j) = *reinterpret_cast<float4*>(o_i + i * d_k + j); 
+                *reinterpret_cast<float4*>(O + (q_idx_br + i) * d_k + j) = *reinterpret_cast<float4*>(o_i + i * d_k + j) * (1/sum); 
             }
         }
         __syncthreads(); 
     }
 }
+
 
 torch::Tensor forward(torch::Tensor& Q, torch::Tensor& K, torch::Tensor& V) {
     const int num_batch = Q.size(0); 

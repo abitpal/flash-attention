@@ -2,3 +2,5 @@ src/*.o
 build/*
 !build/.gitkeep
 scratch/
+*.nsys-rep
+*.sqlite

@@ -10,6 +10,7 @@
 
 const unsigned full_mask = 0xffffffff; 
 const int col_per_thread = 16; 
+const int d_k = 64;
 // const int sram_size_limit = 49152 / sizeof(float); 
 // const int max_b_r = (sram_size_limit / (d_k * 4));  // block rows (query block size)
 // const int b_c = b_r; 
@@ -57,7 +58,8 @@ void flash_attn_forward(
 
     // https://siboehm.com/articles/22/CUDA-MMM Global Memory Coalescing
     for (int q_idx = 0; q_idx < t_r; q_idx++) {
-        int true_br = min(n_seq_q, (q_idx + 1) * b_r) - b_r * q_idx; 
+        int q_idx_br = q_idx * b_r; 
+        int true_br = min(n_seq_q, (q_idx + 1) * b_r) - q_idx_br; 
         for (int i = thread_z * tcount_y + thread_y; i < true_br; i += tcount_y * tcount_z) {
             const int offset_i = i * d_k; 
             for (int j = 4 * thread_x; j < d_k; j += 4 * tcount_x) {
@@ -67,10 +69,12 @@ void flash_attn_forward(
             }
         }
         for (int i = 4 * (thread_y * tcount_x + thread_x); i < true_br; i += 4 * tcount_x * tcount_y) {
-            *reinterpret_cast<float4*>(L + b_r * q_idx + i) = {0, 0, 0, 0}; 
-            *reinterpret_cast<float4*>(M + b_r * q_idx + i) = {-INFINITY, -INFINITY, -INFINITY, -INFINITY}; 
+            *reinterpret_cast<float4*>(L + q_idx_br + i) = {0, 0, 0, 0}; 
+            *reinterpret_cast<float4*>(M + q_idx_br + i) = {-INFINITY, -INFINITY, -INFINITY, -INFINITY}; 
         }
         __syncthreads(); 
+        float mx = -INFINITY; 
+        float sum = 0; 
         for (int k_idx = 0; k_idx < t_c; k_idx++) {
             int true_bc = min(n_seq_k, (k_idx + 1) * b_c) - b_c * k_idx; 
             assert(true_bc % 4 == 0); 
@@ -82,10 +86,10 @@ void flash_attn_forward(
                 }
             }
             __syncthreads();
-            // store S in o_i / allocate 32 threads per element
+            // // store S in o_i / allocate 32 threads per element
             for (int i = thread_z * tcount_y + thread_y; i < true_br; i += tcount_y * tcount_z) {
-                float mx = M[q_idx * b_r + i]; 
-                float sum = L[q_idx * b_r + i]; 
+                // float mx = M[q_idx_br + i]; 
+                // float sum = L[q_idx_br + i]; 
                 // printf("%f\n", o_i_im.x); 
                 for (int j = 0; j < true_bc; j += col_per_thread) {
                     float dot_prod[col_per_thread]; 
@@ -124,17 +128,17 @@ void flash_attn_forward(
                     }
                     mx = new_mx; 
                 }
-                if (thread_x == 0) {
-                    M[q_idx * b_r + i] = mx; 
-                    L[q_idx * b_r + i] = sum; 
-                }
             }
         }
         for (int i = thread_z * tcount_y + thread_y; i < true_br; i += tcount_y * tcount_z) {
-            float sum = L[q_idx * b_r + i]; 
+            // float sum = L[q_idx_br + i]; 
             for (int j = 4 * thread_x; j < d_k; j += 4 * tcount_x) {
-                *reinterpret_cast<float4*>(O + (q_idx * b_r + i) * d_k + j) = *reinterpret_cast<float4*>(o_i + i * d_k + j) * (1/sum); 
+                *reinterpret_cast<float4*>(O + (q_idx_br + i) * d_k + j) = *reinterpret_cast<float4*>(o_i + i * d_k + j) * (1/sum); 
             }
+        }
+        if (thread_x == 0) {
+            M[q_idx_br + thread_z * tcount_y + thread_y] = mx; 
+            L[q_idx_br + thread_z * tcount_y + thread_y] = sum; 
         }
         __syncthreads(); 
     }
