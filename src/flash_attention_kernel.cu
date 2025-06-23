@@ -15,7 +15,8 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
 }
 
 const unsigned full_mask = 0xffffffff; 
-const int col_per_thread = 16; 
+const int col_per_thread = 8; 
+const int d_k = 64;
 // const int sram_size_limit = 49152 / sizeof(float); 
 // const int max_b_r = (sram_size_limit / (d_k * 4));  // block rows (query block size)
 // const int b_c = b_r; 
@@ -78,6 +79,8 @@ void flash_attn_forward(
             *reinterpret_cast<float4*>(M + q_idx_br + i) = {-INFINITY, -INFINITY, -INFINITY, -INFINITY}; 
         }
         __syncthreads(); 
+        float mx = -INFINITY; 
+        float sum = 0; 
         for (int k_idx = 0; k_idx < t_c; k_idx++) {
             int true_bc = min(n_seq_k, (k_idx + 1) * b_c) - b_c * k_idx; 
             assert(true_bc % 4 == 0); 
@@ -90,32 +93,32 @@ void flash_attn_forward(
             }
             __syncthreads();
             // // store S in o_i / allocate 32 threads per element
-            // float mx = M[q_idx * b_r + thread_z * tcount_y + thread_y]; 
-            // float sum = L[q_idx * b_r + thread_z * tcount_y + thread_y]; 
-
             for (int i = thread_z * tcount_y + thread_y; i < true_br; i += tcount_y * tcount_z) {
-                float mx = M[q_idx_br + i]; 
-                float sum = L[q_idx_br + i]; 
+                // float mx = M[q_idx_br + i]; 
+                // float sum = L[q_idx_br + i]; 
                 // printf("%f\n", o_i_im.x); 
                 for (int j = 0; j < true_bc; j += col_per_thread) {
                     float dot_prod[col_per_thread]; 
-                    for (int c = 0; c < col_per_thread; ++c) dot_prod[c] = 0 ;
+                    for (int c = 0; c < col_per_thread; ++c) dot_prod[c] = 0; 
                     // vectorization + register tiling
                     for (int k = 4 * thread_x; k < d_k; k += 4 * tcount_x) {
                         float4 q_val = *reinterpret_cast<float4*>(q_i + i * d_k + k); 
+                        #pragma unroll
                         for (int c = 0; c < col_per_thread; ++c) {
                             float4 k_val = *reinterpret_cast<float4*>(k_i + (j + c) * d_k + k); 
                             dot_prod[c] += q_val * k_val; 
                         }
                     }
                     float new_mx = mx; 
+                    #pragma unroll
                     for (int c = 0; c < col_per_thread; ++c) {
+                        #pragma unroll
                         for (int offset = 4; offset > 0; offset /= 2) {
                             dot_prod[c] += __shfl_down_sync(full_mask, dot_prod[c], offset);
                         }
                         dot_prod[c] = __shfl_sync(full_mask, dot_prod[c], ty_lead); 
                         float prev_mx = new_mx; 
-                        new_mx = max(new_mx, dot_prod[c]); 
+                        new_mx = fmaxf(new_mx, dot_prod[c]); 
                         sum = sum * __expf(prev_mx - new_mx) + __expf(dot_prod[c] - new_mx); 
                     }
                     
@@ -134,24 +137,30 @@ void flash_attn_forward(
                     }
                     mx = new_mx; 
                 }
-                if (thread_x == 0) {
-                    M[q_idx_br + i] = mx; 
-                    L[q_idx_br + i] = sum; 
-                }
             }
         }
+        const float inv_sum = __frcp_rn(sum); 
         for (int i = thread_z * tcount_y + thread_y; i < true_br; i += tcount_y * tcount_z) {
-            float sum = L[q_idx_br + i]; 
+            // float sum = L[q_idx_br + i]; 
             for (int j = 4 * thread_x; j < d_k; j += 4 * tcount_x) {
-                *reinterpret_cast<float4*>(O + (q_idx_br + i) * d_k + j) = *reinterpret_cast<float4*>(o_i + i * d_k + j) * (1/sum); 
+                *reinterpret_cast<float4*>(O + (q_idx_br + i) * d_k + j) = *reinterpret_cast<float4*>(o_i + i * d_k + j) * inv_sum; 
             }
+        }
+        if (thread_x == 0) {
+            M[q_idx_br + thread_z * tcount_y + thread_y] = mx; 
+            L[q_idx_br + thread_z * tcount_y + thread_y] = sum; 
         }
         __syncthreads(); 
     }
 }
 
 
+
 torch::Tensor forward(torch::Tensor& Q, torch::Tensor& K, torch::Tensor& V) {
+    cudaFuncSetAttribute(flash_attn_forward,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize,
+                         65536);
+
     const int num_batch = Q.size(0); 
     const int num_heads = Q.size(1); 
     const int seq_len_q = Q.size(2); 
@@ -165,10 +174,12 @@ torch::Tensor forward(torch::Tensor& Q, torch::Tensor& K, torch::Tensor& V) {
     // const int b_r = min(seq_len_q, (sram_size_limit / ((d_k + d_v) * 2)));  // block rows (query block size)
     // const int b_c = min(min(d_k, seq_len_k), (sram_size_limit / ((d_k + d_v) * 2)));  // block columns (key/value block size)
     const int offset = -16; 
-    const int b_r = 48 - offset; 
-    const int b_c = 48 + offset; 
+    const int b_size = 64; 
+    const int b_r = b_size - offset; 
+    const int b_c = b_size + offset; 
     const int t_r = (seq_len_q + b_r - 1) / b_r;  // number of query tiles
     const int t_c = (seq_len_k + b_c - 1) / b_c;  // number of key tiles
+    
 
     int sram_size = (b_r * d_k + b_c * d_k + b_c * d_v + b_r * d_v) * sizeof(float); // = (b_r + b_c) * (d_k + d_v)
 

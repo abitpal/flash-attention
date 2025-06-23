@@ -9,7 +9,7 @@
 #include <cmath>
 
 const unsigned full_mask = 0xffffffff; 
-const int col_per_thread = 8; 
+const int col_per_thread = 32; 
 const int d_k = 64;
 // const int sram_size_limit = 49152 / sizeof(float); 
 // const int max_b_r = (sram_size_limit / (d_k * 4));  // block rows (query block size)
@@ -85,13 +85,11 @@ void flash_attn_forward(
                     *reinterpret_cast<float4*>(v_i + i * d_k + j) = __ldg(reinterpret_cast<float4*>(V + (i + k_idx * b_c) * d_k + j)); 
                 }
             }
-            __syncthreads();
+            // __syncthreads();
             // // store S in o_i / allocate 32 threads per element
             for (int i = thread_z * tcount_y + thread_y; i < true_br; i += tcount_y * tcount_z) {
-                // float mx = M[q_idx_br + i]; 
-                // float sum = L[q_idx_br + i]; 
-                // printf("%f\n", o_i_im.x); 
                 for (int j = 0; j < true_bc; j += col_per_thread) {
+                    __syncthreads(); 
                     float dot_prod[col_per_thread]; 
                     for (int c = 0; c < col_per_thread; ++c) dot_prod[c] = 0; 
                     // vectorization + register tiling
@@ -119,10 +117,8 @@ void flash_attn_forward(
                     for (int c = 0; c < col_per_thread; ++c) {
                         dot_prod[c] = __expf(dot_prod[c] - new_mx); 
                     }
-
                     float o_i_exp = __expf(mx - new_mx); 
-
-                    for (int l = 0, k = 4 * thread_x; k < d_k; k += 4 * tcount_x, ++l) {
+                    for (int k = 4 * thread_x; k < d_k; k += 4 * tcount_x) {
                         float4 v_val = {0, 0, 0, 0}; 
                         for (int c = 0; c < col_per_thread; ++c) {
                             v_val = v_val + *reinterpret_cast<float4*>(v_i + (j + c) * d_k + k) * dot_prod[c]; 
@@ -287,7 +283,7 @@ int main() {
     // Flash attention parameters
     // const int b_r = min(seq_len_q, (sram_size_limit / ((d_k + d_v) * 2)));  // block rows (query block size)
     // const int b_c = min(min(d_k, seq_len_k), (sram_size_limit / ((d_k + d_v) * 2)));  // block columns (key/value block size)
-    const int offset = -16; 
+    const int offset = 0; 
     const int b_size = 64; 
     const int b_r = b_size - offset; 
     const int b_c = b_size + offset; 
@@ -379,7 +375,7 @@ int main() {
 
     cudaProfilerStart();  // Begin nsys profiling window
     CUDA_CHECK(cudaEventRecord(start));
-    int N = 100; 
+    int N = 500; 
     for (int i = 0; i < N; ++i) {
         flash_attn_forward<<<grid, block, sram_size>>>(d_Q, d_K, d_V, d_O, d_L, d_M, b_c, b_r, t_c, t_r, seq_len_k, seq_len_q, d_k, scaling_factor);
     }
