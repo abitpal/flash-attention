@@ -9,7 +9,7 @@
 #include <cmath>
 
 const unsigned full_mask = 0xffffffff; 
-const int col_per_thread = 32; 
+const int col_per_thread = 16; 
 const int d_k = 64;
 // const int sram_size_limit = 49152 / sizeof(float); 
 // const int max_b_r = (sram_size_limit / (d_k * 4));  // block rows (query block size)
@@ -85,26 +85,22 @@ void flash_attn_forward(
                     *reinterpret_cast<float4*>(v_i + i * d_k + j) = __ldg(reinterpret_cast<float4*>(V + (i + k_idx * b_c) * d_k + j)); 
                 }
             }
-            // __syncthreads();
+            __syncthreads();
             // // store S in o_i / allocate 32 threads per element
             for (int i = thread_z * tcount_y + thread_y; i < true_br; i += tcount_y * tcount_z) {
                 for (int j = 0; j < true_bc; j += col_per_thread) {
-                    __syncthreads(); 
                     float dot_prod[col_per_thread]; 
-                    for (int c = 0; c < col_per_thread; ++c) dot_prod[c] = 0; 
+                    for (int c = 0; c < col_per_thread; ++c) dot_prod[c] = 0 ;
                     // vectorization + register tiling
                     for (int k = 4 * thread_x; k < d_k; k += 4 * tcount_x) {
                         float4 q_val = *reinterpret_cast<float4*>(q_i + i * d_k + k); 
-                        #pragma unroll
                         for (int c = 0; c < col_per_thread; ++c) {
                             float4 k_val = *reinterpret_cast<float4*>(k_i + (j + c) * d_k + k); 
                             dot_prod[c] += q_val * k_val; 
                         }
                     }
                     float new_mx = mx; 
-                    #pragma unroll
                     for (int c = 0; c < col_per_thread; ++c) {
-                        #pragma unroll
                         for (int offset = 4; offset > 0; offset /= 2) {
                             dot_prod[c] += __shfl_down_sync(full_mask, dot_prod[c], offset);
                         }
@@ -117,8 +113,10 @@ void flash_attn_forward(
                     for (int c = 0; c < col_per_thread; ++c) {
                         dot_prod[c] = __expf(dot_prod[c] - new_mx); 
                     }
+
                     float o_i_exp = __expf(mx - new_mx); 
-                    for (int k = 4 * thread_x; k < d_k; k += 4 * tcount_x) {
+
+                    for (int l = 0, k = 4 * thread_x; k < d_k; k += 4 * tcount_x, ++l) {
                         float4 v_val = {0, 0, 0, 0}; 
                         for (int c = 0; c < col_per_thread; ++c) {
                             v_val = v_val + *reinterpret_cast<float4*>(v_i + (j + c) * d_k + k) * dot_prod[c]; 
@@ -254,10 +252,6 @@ bool compare_results(const T* gpu_result, const T* cpu_result, int size, T toler
 
 int main() {
 
-    cudaFuncSetAttribute(flash_attn_forward,
-                         cudaFuncAttributeMaxDynamicSharedMemorySize,
-                         65536);
-
     int device = 0; 
     cudaDeviceProp prop;
 
@@ -268,7 +262,6 @@ int main() {
     std::cout << "Shared memory per block: " << prop.sharedMemPerBlock << " bytes" << std::endl;
 
     int sram_size_limit = prop.sharedMemPerBlock / sizeof(float); 
-
 
     // Test parameters - 4, 8, 128, 64
     const int batch_size = 4;
@@ -283,10 +276,9 @@ int main() {
     // Flash attention parameters
     // const int b_r = min(seq_len_q, (sram_size_limit / ((d_k + d_v) * 2)));  // block rows (query block size)
     // const int b_c = min(min(d_k, seq_len_k), (sram_size_limit / ((d_k + d_v) * 2)));  // block columns (key/value block size)
-    const int offset = 0; 
-    const int b_size = 64; 
-    const int b_r = b_size - offset; 
-    const int b_c = b_size + offset; 
+    const int offset = -16; 
+    const int b_r = 48 - offset; 
+    const int b_c = 48 + offset; 
     const int t_r = (seq_len_q + b_r - 1) / b_r;  // number of query tiles
     const int t_c = (seq_len_k + b_c - 1) / b_c;  // number of key tiles
 
@@ -295,7 +287,7 @@ int main() {
     sram_size / (d_k + d_v) / 2
     */
     std::cout << "Shared memory size: " << sram_size << " bytes" << std::endl;
-    // assert((sram_size <= prop.sharedMemPerBlock)); 
+    assert((sram_size <= prop.sharedMemPerBlock)); 
     
     std::cout << "Test Parameters:" << std::endl;
     std::cout << "Batch size: " << batch_size << std::endl;
@@ -375,7 +367,7 @@ int main() {
 
     cudaProfilerStart();  // Begin nsys profiling window
     CUDA_CHECK(cudaEventRecord(start));
-    int N = 500; 
+    int N = 100; 
     for (int i = 0; i < N; ++i) {
         flash_attn_forward<<<grid, block, sram_size>>>(d_Q, d_K, d_V, d_O, d_L, d_M, b_c, b_r, t_c, t_r, seq_len_k, seq_len_q, d_k, scaling_factor);
     }

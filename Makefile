@@ -3,9 +3,8 @@
 NVCC = nvcc
 PROFILER = nvprof
 PROFILER_FLAGS = 
-CFLAGS = -arch=sm_75 -O3 -lineinfo --use_fast_math --keep-device-functions --resource-usage -Xptxas -v -std=c++17 
-LIBS = -lcublas
-
+CFLAGS = -arch=sm_75 -O3 -lineinfo --use_fast_math --keep-device-functions --resource-usage -Xptxas -v -std=c++17
+LIBS = 
 # Directories
 SRC_DIR = src
 BUILD_DIR = build

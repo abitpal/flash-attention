@@ -15,7 +15,7 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
 }
 
 const unsigned full_mask = 0xffffffff; 
-const int col_per_thread = 8; 
+const int col_per_thread = 32; 
 const int d_k = 64;
 // const int sram_size_limit = 49152 / sizeof(float); 
 // const int max_b_r = (sram_size_limit / (d_k * 4));  // block rows (query block size)
@@ -114,7 +114,8 @@ void flash_attn_forward(
                     for (int c = 0; c < col_per_thread; ++c) {
                         #pragma unroll
                         for (int offset = 4; offset > 0; offset /= 2) {
-                            dot_prod[c] += __shfl_down_sync(full_mask, dot_prod[c], offset);
+                            float res = __shfl_down_sync(full_mask, dot_prod[c], offset);
+                            dot_prod[c] += res; 
                         }
                         dot_prod[c] = __shfl_sync(full_mask, dot_prod[c], ty_lead); 
                         float prev_mx = new_mx; 
@@ -173,7 +174,7 @@ torch::Tensor forward(torch::Tensor& Q, torch::Tensor& K, torch::Tensor& V) {
     // Flash attention parameters
     // const int b_r = min(seq_len_q, (sram_size_limit / ((d_k + d_v) * 2)));  // block rows (query block size)
     // const int b_c = min(min(d_k, seq_len_k), (sram_size_limit / ((d_k + d_v) * 2)));  // block columns (key/value block size)
-    const int offset = -16; 
+    const int offset = -0; 
     const int b_size = 64; 
     const int b_r = b_size - offset; 
     const int b_c = b_size + offset; 
