@@ -123,12 +123,12 @@ int main() {
     int sram_size_limit = prop.sharedMemPerBlock / sizeof(float); 
 
     // Test parameters
-    const int batch_size = 8;
-    const int num_heads = 2;
-    const int seq_len_q = 1024;
-    const int seq_len_k = 1024;
-    const int d_k = 256;
-    const int d_v = 256;
+    const int batch_size = 4;
+    const int num_heads = 8;
+    const int seq_len_q = 128;
+    const int seq_len_k = 128;
+    const int d_k = 64;
+    const int d_v = 64;
 
     int queries_per_thread = 1; 
     
