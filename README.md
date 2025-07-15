@@ -7,3 +7,10 @@ Couple reasons as to why I did this:
 * For my sake. I often struggle with writing optimized code that optimize beyound time and space complexities so I wanted to challenge myself in writing something that's truly fast (faster than pytorch).
 * To learn cuda.
 
+## Repository Overview
+There are 3 branches in the repository. 
+1) **main**: This branch is the simple and very readable implementation of flash attention that's very very very slow.
+2) **flash-optimized**: This branch contains the majority of the optimizations that I made - this is much faster than the naive implementation and compares well to pyTorch.
+3) **flash-optimized-2**: This branch contains a little more optimizations on top of flash-optimized.
+
+   
