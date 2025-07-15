@@ -14,3 +14,5 @@ There are 3 branches in the repository.
 3) **flash-optimized-2**: This branch contains a little more optimizations on top of flash-optimized.
 
    
+## Optimizations
+I want to focus this repo on explaining the implementation specific optimization of flash attention that can make it truly fast. However, [here](https://gordicaleksa.medium.com/eli5-flash-attention-5c44017022ad) is a great resource that helped me understand flash attention beyound the paper itself. 
